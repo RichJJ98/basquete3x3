@@ -228,6 +228,14 @@ export default function App() {
     setView(V.LOOKUP)
   }
 
+  // ── REMOVER JOGADOR ───────────────────────────────────────
+  const removePlayer = async (id) => {
+    const { error } = await supabase.from('players').delete().eq('id', id)
+    if (error) { notify('Erro ao remover jogador', 'err'); return }
+    setPlayers(prev => prev.filter(p => p.id !== id))
+    notify('🗑️ Jogador removido!')
+  }
+
   if (loading) return <Splash />
 
   return (
@@ -246,6 +254,7 @@ export default function App() {
               ? <AdminView players={players} teams={teams} games={games} deadline={deadline}
                   drawn={drawn} settings={settings} execDraw={execDraw}
                   saveGame={saveGame} saveSettings={saveSettings} saveDeadline={saveDeadline}
+                  removePlayer={removePlayer}
                   setView={setView} setActiveGame={setActiveGame} notify={notify} />
               : <AdminLogin correctPass={settings.admin_pass} onSuccess={() => setAdminOk(true)} />
           )}
@@ -547,7 +556,7 @@ function AdminLogin({ correctPass, onSuccess }) {
 /* ─────────────────────────────────────────────────────────────
    ADMIN VIEW
 ───────────────────────────────────────────────────────────── */
-function AdminView({ players, teams, games, deadline, drawn, settings, execDraw, saveGame, saveSettings, saveDeadline, setView, setActiveGame, notify }) {
+function AdminView({ players, teams, games, deadline, drawn, settings, execDraw, saveGame, saveSettings, saveDeadline, removePlayer, setView, setActiveGame, notify }) {
   const [tab, setTab] = useState('dash')
   const TABS = [
     { k: 'dash', l: 'Dashboard' },
@@ -565,7 +574,7 @@ function AdminView({ players, teams, games, deadline, drawn, settings, execDraw,
         ))}
       </div>
       {tab === 'dash'    && <AdminDash players={players} teams={teams} games={games} drawn={drawn} deadline={deadline} execDraw={execDraw} saveDeadline={saveDeadline} />}
-      {tab === 'players' && <AdminPlayers players={players} teams={teams} />}
+      {tab === 'players' && <AdminPlayers players={players} teams={teams} removePlayer={removePlayer} drawn={drawn} notify={notify} />}
       {tab === 'bracket' && <AdminBracket games={games} setView={setView} setActiveGame={setActiveGame} />}
       {tab === 'teams'   && <AdminTeams teams={teams} players={players} games={games} />}
       {tab === 'config'  && <AdminConfig settings={settings} saveSettings={saveSettings} />}
@@ -613,26 +622,57 @@ function AdminDash({ players, teams, games, drawn, deadline, execDraw, saveDeadl
   )
 }
 
-function AdminPlayers({ players, teams }) {
+function AdminPlayers({ players, teams, removePlayer, drawn, notify }) {
+  const [confirmId, setConfirmId] = useState(null)
+
+  const handleRemove = (id) => {
+    if (drawn) { notify('Não é possível remover após o sorteio', 'err'); return }
+    setConfirmId(id)
+  }
+
   return (
-    <div className="table-wrap">
-      <table className="data-table">
-        <thead><tr><th>#</th><th>Nome</th><th>Posição</th><th>Time</th><th>Inscrito em</th></tr></thead>
-        <tbody>
-          {players.map((p, i) => {
-            const t = teams.find(t => Array.isArray(t.players) && t.players.includes(p.id))
-            return (
-              <tr key={p.id}>
-                <td className="muted">{i + 1}</td>
-                <td><strong>{p.name}</strong></td>
-                <td><span className="pos-badge">{p.position}</span></td>
-                <td>{t ? <><span className="team-dot" style={{ background: t.color }} />{t.name}</> : '—'}</td>
-                <td className="muted sm">{new Date(p.created_at).toLocaleDateString('pt-BR')}</td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
+    <div>
+      {confirmId && (
+        <div className="confirm-overlay">
+          <div className="confirm-box">
+            <p className="confirm-msg">⚠️ Remover <strong>{players.find(p => p.id === confirmId)?.name}</strong>?</p>
+            <p className="muted" style={{ marginBottom: 16 }}>Essa ação não pode ser desfeita.</p>
+            <div className="confirm-btns">
+              <button className="action-btn" onClick={() => setConfirmId(null)}>Cancelar</button>
+              <button className="action-btn danger" onClick={() => { removePlayer(confirmId); setConfirmId(null) }}>
+                Confirmar Remoção
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      <div className="table-wrap">
+        <table className="data-table">
+          <thead><tr><th>#</th><th>Nome</th><th>Posição</th><th>Time</th><th>Inscrito em</th><th></th></tr></thead>
+          <tbody>
+            {players.map((p, i) => {
+              const t = teams.find(t => Array.isArray(t.players) && t.players.includes(p.id))
+              return (
+                <tr key={p.id}>
+                  <td className="muted">{i + 1}</td>
+                  <td><strong>{p.name}</strong></td>
+                  <td><span className="pos-badge">{p.position}</span></td>
+                  <td>{t ? <><span className="team-dot" style={{ background: t.color }} />{t.name}</> : '—'}</td>
+                  <td className="muted sm">{new Date(p.created_at).toLocaleDateString('pt-BR')}</td>
+                  <td>
+                    {!drawn && (
+                      <button className="remove-btn" onClick={() => handleRemove(p.id)} title="Remover jogador">
+                        🗑️
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+        {drawn && <p className="muted sm" style={{ marginTop: 8, textAlign: 'center' }}>⚠️ Remoção bloqueada após o sorteio.</p>}
+      </div>
     </div>
   )
 }
@@ -1150,6 +1190,12 @@ textarea.field-input{resize:vertical;}
 .gp-meta{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin-top:14px;}
 .gp-actions{display:flex;gap:8px;margin-top:14px;justify-content:flex-end;}
 .back-btn{background:var(--bg2);border:1px solid var(--border);color:var(--muted);padding:8px 15px;border-radius:8px;cursor:pointer;font-size:13px;margin-bottom:14px;}
+.remove-btn{background:none;border:none;cursor:pointer;font-size:15px;padding:4px 6px;border-radius:4px;transition:background .15s;opacity:.5;}
+.remove-btn:hover{background:rgba(239,68,68,.15);opacity:1;}
+.confirm-overlay{position:fixed;inset:0;background:#0009;z-index:200;display:flex;align-items:center;justify-content:center;}
+.confirm-box{background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:28px;max-width:380px;width:90%;box-shadow:0 20px 60px #000a;}
+.confirm-msg{font-size:16px;margin-bottom:6px;color:var(--text);}
+.confirm-btns{display:flex;gap:10px;justify-content:flex-end;}
 .muted{color:var(--muted);font-size:13px;line-height:1.6;}
 .muted strong{color:var(--text);}
 .sm{font-size:11px;}
