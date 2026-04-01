@@ -38,7 +38,8 @@ create table if not exists teams (
   losses  int  default 0,
   draws   int  default 0,
   pf      int  default 0,
-  pa      int  default 0
+  pa      int  default 0,
+  named   boolean default false  -- true após o time escolher seu nome
 );
 
 -- 5. Jogos

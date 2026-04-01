@@ -286,6 +286,31 @@ export default function App() {
     notify('🗑️ Jogador removido!')
   }
 
+  // ── RENOMEAR TIME ─────────────────────────────────────────
+  const renameTeam = async (teamId, newName) => {
+    const trimmed = newName.trim()
+    if (!trimmed) { notify('Nome não pode ser vazio', 'err'); return }
+    if (teams.find(t => t.id !== teamId && t.name.toLowerCase() === trimmed.toLowerCase())) {
+      notify('Esse nome já está sendo usado por outro time', 'err'); return
+    }
+    await supabase.from('teams').update({ name: trimmed, named: true }).eq('id', teamId)
+    const teamGames = games.filter(g => g.team_a.id === teamId || g.team_b.id === teamId)
+    for (const g of teamGames) {
+      const patch = {}
+      if (g.team_a.id === teamId) patch.team_a = { ...g.team_a, name: trimmed }
+      if (g.team_b.id === teamId) patch.team_b = { ...g.team_b, name: trimmed }
+      await supabase.from('games').update(patch).eq('id', g.id)
+    }
+    setTeams(prev => prev.map(t => t.id === teamId ? { ...t, name: trimmed, named: true } : t))
+    setGames(prev => prev.map(g => {
+      const upd = { ...g }
+      if (g.team_a.id === teamId) upd.team_a = { ...g.team_a, name: trimmed }
+      if (g.team_b.id === teamId) upd.team_b = { ...g.team_b, name: trimmed }
+      return upd
+    }))
+    notify('✅ Nome do time atualizado!')
+  }
+
   if (loading) return <Splash />
 
   return (
@@ -298,7 +323,7 @@ export default function App() {
 
           {view === V.HOME   && <HomeView teams={teams} games={games} deadline={deadline} drawn={drawn} setView={setView} eventName={settings.event_name} venue={settings.venue} />}
           {view === V.REG    && <RegisterView addPlayer={addPlayer} deadline={deadline} drawn={drawn} />}
-          {view === V.LOOKUP && <LookupView players={players} teams={teams} games={games} myName={myName} setMyName={setMyName} />}
+          {view === V.LOOKUP && <LookupView players={players} teams={teams} games={games} myName={myName} setMyName={setMyName} renameTeam={renameTeam} />}
           {view === V.ADMIN  && (
             adminOk
               ? <AdminView players={players} teams={teams} games={games} deadline={deadline}
@@ -488,15 +513,34 @@ function RegisterView({ addPlayer, deadline, drawn }) {
 /* ─────────────────────────────────────────────────────────────
    LOOKUP
 ───────────────────────────────────────────────────────────── */
-function LookupView({ players, teams, games, myName, setMyName }) {
-  const [q, setQ] = useState(myName || '')
-  const found = q.trim().length > 1
+function LookupView({ players, teams, games, myName, setMyName, renameTeam }) {
+  const [q, setQ]           = useState(myName || '')
+  const [newTeamName, setNewTeamName] = useState('')
+  const [renaming, setRenaming]       = useState(false)
+  const [saving, setSaving]           = useState(false)
+
+  const found   = q.trim().length > 1
     ? players.find(p => p.name.toLowerCase().includes(q.trim().toLowerCase()))
     : null
-  const team   = found ? teams.find(t => Array.isArray(t.players) && t.players.includes(found.id)) : null
+  const team    = found ? teams.find(t => Array.isArray(t.players) && t.players.includes(found.id)) : null
+  const teammates = team
+    ? players.filter(p => team.players.includes(p.id) && p.id !== found?.id)
+    : []
   const myGames = team ? games.filter(g => g.team_a.id === team.id || g.team_b.id === team.id) : []
-  const done   = myGames.filter(g => g.status === 'done')
-  const next   = myGames.filter(g => g.status === 'pending' || g.status === 'live')
+  const done    = myGames.filter(g => g.status === 'done')
+  const next    = myGames.filter(g => g.status === 'pending' || g.status === 'live')
+
+  // Só pode renomear se: sorteio feito, time ainda não foi nomeado, jogador é do time
+  const canRename = team && !team.named && found
+
+  const handleRename = async () => {
+    if (!newTeamName.trim()) return
+    setSaving(true)
+    await renameTeam(team.id, newTeamName)
+    setSaving(false)
+    setRenaming(false)
+    setNewTeamName('')
+  }
 
   return (
     <div className="page">
@@ -517,14 +561,23 @@ function LookupView({ players, teams, games, myName, setMyName }) {
 
       {team && (
         <>
+          {/* ── Card principal do time ── */}
           <div className="card team-hero-card" style={{ '--tc': team.color }}>
             <div className="team-jersey">
               <div className="jersey-shape" style={{ background: team.color }} />
-              <span className="jersey-initial">{team.name.split(' ')[1]?.[0] || 'T'}</span>
+              <span className="jersey-initial">{team.name[team.name.lastIndexOf(' ') + 1] || 'T'}</span>
             </div>
-            <div>
-              <h2 className="team-name-big">{team.name}</h2>
-              <p className="muted">{found.position} · {found.name}</p>
+            <div style={{ flex: 1 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <h2 className="team-name-big">{team.name}</h2>
+                {canRename && !renaming && (
+                  <button className="rename-trigger" onClick={() => { setRenaming(true); setNewTeamName('') }}>
+                    ✏️ Dar nome
+                  </button>
+                )}
+                {team.named && <span className="named-badge">✅ Nomeado</span>}
+              </div>
+              <p className="muted">{found.position} · <strong style={{color:'#e8edf5'}}>{found.name}</strong> <span style={{color:'var(--accent)'}}>← você</span></p>
               <div className="team-mini-stats">
                 <span>V <strong>{team.wins}</strong></span>
                 <span>D <strong>{team.losses}</strong></span>
@@ -535,12 +588,55 @@ function LookupView({ players, teams, games, myName, setMyName }) {
             </div>
           </div>
 
+          {/* ── Formulário de renomear ── */}
+          {renaming && (
+            <div className="card rename-card">
+              <h3 className="card-title">✏️ Escolher nome do time</h3>
+              <p className="muted" style={{ marginBottom: 12 }}>
+                Só pode ser definido uma vez. Escolha bem — todos os seus colegas verão esse nome!
+              </p>
+              <div className="row-fields">
+                <input className="field-input" placeholder="Nome do time..." maxLength={30}
+                  value={newTeamName} onChange={e => setNewTeamName(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && handleRename()} autoFocus />
+                <button className="action-btn" onClick={handleRename} disabled={saving || !newTeamName.trim()}>
+                  {saving ? '...' : 'Confirmar'}
+                </button>
+                <button className="action-btn" style={{ background: 'var(--bg3)' }} onClick={() => setRenaming(false)}>
+                  Cancelar
+                </button>
+              </div>
+              <p className="muted sm" style={{ marginTop: 6 }}>{newTeamName.length}/30 caracteres</p>
+            </div>
+          )}
+
+          {/* ── Elenco do time ── */}
+          <Section title="👥 Seu Elenco">
+            <div className="roster-card" style={{ '--tc': team.color }}>
+              {/* jogador atual em destaque */}
+              <div className="roster-row me">
+                <span className="roster-pos" style={{ background: team.color + '33', color: team.color }}>{found.position}</span>
+                <span className="roster-name">{found.name}</span>
+                <span className="roster-you">você</span>
+              </div>
+              {/* colegas */}
+              {teammates.map(p => (
+                <div key={p.id} className="roster-row">
+                  <span className="roster-pos">{p.position}</span>
+                  <span className="roster-name">{p.name}</span>
+                </div>
+              ))}
+            </div>
+          </Section>
+
+          {/* ── Próximos jogos ── */}
           {next.length > 0 && (
             <Section title="📅 Próximos Jogos">
               <div className="game-grid">{next.map(g => <GameCard key={g.id} game={g} highlight={team.id} />)}</div>
             </Section>
           )}
 
+          {/* ── Resultados ── */}
           {done.length > 0 && (
             <Section title="📊 Resultados do Time">
               <div className="result-list">
@@ -1283,6 +1379,17 @@ textarea.field-input{resize:vertical;}
 .pos-count strong{color:var(--text);}
 .remove-btn{background:none;border:none;cursor:pointer;font-size:15px;padding:4px 6px;border-radius:4px;transition:background .15s;opacity:.5;}
 .remove-btn:hover{background:rgba(239,68,68,.15);opacity:1;}
+.rename-trigger{background:rgba(249,115,22,.12);border:1px solid rgba(249,115,22,.35);color:var(--accent);padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;transition:all .15s;}
+.rename-trigger:hover{background:var(--accent);color:#fff;}
+.named-badge{background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.3);color:#22c55e;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;}
+.rename-card{border-left:3px solid var(--accent);}
+.roster-card{background:var(--bg3);border-radius:12px;overflow:hidden;}
+.roster-row{display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--border);}
+.roster-row:last-child{border-bottom:none;}
+.roster-row.me{background:rgba(249,115,22,.07);}
+.roster-pos{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;background:rgba(255,255,255,.07);color:var(--muted);flex-shrink:0;}
+.roster-name{font-size:14px;font-weight:600;color:var(--text);flex:1;}
+.roster-you{font-size:11px;font-weight:700;color:var(--accent);background:rgba(249,115,22,.12);padding:2px 8px;border-radius:20px;flex-shrink:0;}
 .confirm-overlay{position:fixed;inset:0;background:#0009;z-index:200;display:flex;align-items:center;justify-content:center;}
 .confirm-box{background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:28px;max-width:380px;width:90%;box-shadow:0 20px 60px #000a;}
 .confirm-msg{font-size:16px;margin-bottom:6px;color:var(--text);}
