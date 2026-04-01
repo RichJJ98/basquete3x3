@@ -4,11 +4,60 @@ import { supabase, dbGet, dbSet, dbAll } from './supabase.js'
 /* ─────────────────────────────────────────────────────────────
    CONSTANTS
 ───────────────────────────────────────────────────────────── */
-const POSITIONS    = ['Armador', 'Ala', 'Pivô']
-const JERSEY_COLORS = ['#E83A3A', '#2196F3', '#4CAF50', '#FF9800', '#9C27B0']
-const JERSEY_NAMES  = ['Vermelho', 'Azul', 'Verde', 'Laranja', 'Roxo']
-const NUM_TEAMS = 5
+const POSITIONS     = ['Armador', 'Ala', 'Pivô']
+const JERSEY_COLORS = ['#E83A3A','#2196F3','#4CAF50','#FF9800','#9C27B0','#00BCD4','#FF5722','#8BC34A','#E91E63','#607D8B']
+const JERSEY_NAMES  = ['Vermelho','Azul','Verde','Laranja','Roxo','Ciano','Coral','Lima','Rosa','Cinza']
+const PLAYERS_PER_TEAM = 3   // sempre 3x3
+const MIN_PLAYERS      = 6   // mínimo 2 times
 const FIBA = { winTime: 600, foulsLimit: 6, timeoutsPerTeam: 1 }
+
+/* ─────────────────────────────────────────────────────────────
+   SORTEIO INTELIGENTE POR POSIÇÃO
+   Tenta montar cada time com 1 Armador + 1 Ala + 1 Pivô.
+   Se as posições não fecharem perfeitamente, distribui o
+   restante de forma equilibrada.
+───────────────────────────────────────────────────────────── */
+function smartDraw(players) {
+  const numTeams = Math.floor(players.length / PLAYERS_PER_TEAM)
+
+  // Cria times vazios
+  const teams = Array.from({ length: numTeams }, (_, i) => ({
+    id: uid(),
+    name: `Time ${JERSEY_NAMES[i % JERSEY_NAMES.length]}`,
+    color: JERSEY_COLORS[i % JERSEY_COLORS.length],
+    players: [],
+    wins: 0, losses: 0, draws: 0, pf: 0, pa: 0,
+  }))
+
+  // Separa por posição e embaralha cada grupo
+  const byPos = {
+    'Armador': shuffle(players.filter(p => p.position === 'Armador')),
+    'Ala':     shuffle(players.filter(p => p.position === 'Ala')),
+    'Pivô':    shuffle(players.filter(p => p.position === 'Pivô')),
+  }
+
+  // Distribui 1 de cada posição por time (round-robin)
+  const order = ['Armador', 'Ala', 'Pivô']
+  let teamIdx = 0
+  for (const pos of order) {
+    for (let i = 0; i < numTeams && byPos[pos].length > 0; i++) {
+      const p = byPos[pos].shift()
+      teams[i].players.push(p.id)
+    }
+  }
+
+  // Jogadores restantes (sobras de posição) — distribui pelo time com menos jogadores
+  const remaining = shuffle([...byPos['Armador'], ...byPos['Ala'], ...byPos['Pivô']])
+  for (const p of remaining) {
+    // Encontra o time com menos jogadores que ainda tem vaga (< PLAYERS_PER_TEAM)
+    const target = teams
+      .filter(t => t.players.length < PLAYERS_PER_TEAM)
+      .sort((a, b) => a.players.length - b.players.length)[0]
+    if (target) target.players.push(p.id)
+  }
+
+  return teams.filter(t => t.players.length === PLAYERS_PER_TEAM)
+}
 
 function uid() { return Math.random().toString(36).slice(2, 9) }
 function shuffle(a) {
@@ -122,18 +171,15 @@ export default function App() {
   // ── SORTEIO ───────────────────────────────────────────────
   const execDraw = useCallback(async () => {
     if (drawn) return
-    const list = shuffle(players)
-    if (list.length < NUM_TEAMS) { notify('Mínimo ' + NUM_TEAMS + ' inscritos', 'err'); return }
+    if (players.length < MIN_PLAYERS) {
+      notify(`Mínimo ${MIN_PLAYERS} inscritos para sortear (2 times)`, 'err'); return
+    }
 
-    const newTeams = Array.from({ length: NUM_TEAMS }, (_, i) => ({
-      id: uid(),
-      name: `Time ${JERSEY_NAMES[i]}`,
-      color: JERSEY_COLORS[i],
-      players: [],
-      wins: 0, losses: 0, draws: 0, pf: 0, pa: 0,
-    }))
-    list.forEach((p, i) => newTeams[i % NUM_TEAMS].players.push(p.id))
+    const numTeams = Math.floor(players.length / PLAYERS_PER_TEAM)
+    const usable   = players.slice(0, numTeams * PLAYERS_PER_TEAM) // descarta sobras
+    const leftover = players.slice(numTeams * PLAYERS_PER_TEAM)
 
+    const newTeams = smartDraw(usable)
     const newGames = buildRoundRobin(newTeams)
 
     // Salva no Supabase
@@ -144,7 +190,11 @@ export default function App() {
     setTeams(newTeams)
     setGames(newGames)
     setDrawn(true)
-    notify('🏀 Sorteio realizado! ' + newTeams.length + ' times formados.')
+
+    const msg = leftover.length > 0
+      ? `🏀 ${newTeams.length} times formados! ${leftover.length} jogador(es) ficaram de fora (não completavam um time).`
+      : `🏀 Sorteio realizado! ${newTeams.length} times de ${PLAYERS_PER_TEAM} jogadores.`
+    notify(msg)
   }, [players, drawn])
 
   // ── SALVAR JOGO ───────────────────────────────────────────
@@ -609,12 +659,44 @@ function AdminDash({ players, teams, games, drawn, deadline, execDraw, saveDeadl
       <div className="card">
         <h3 className="card-title">🎲 Sorteio dos Times</h3>
         {drawn
-          ? <p className="muted">✅ Sorteio realizado. {teams.length} times · {players.length} jogadores.</p>
+          ? <p className="muted">✅ Sorteio realizado. {teams.length} times de {PLAYERS_PER_TEAM} jogadores.</p>
           : <>
-              <p className="muted">Serão formados {NUM_TEAMS} times com os {players.length} inscritos. (mín. {NUM_TEAMS})</p>
-              <button className="draw-btn" onClick={execDraw} disabled={players.length < NUM_TEAMS}>
+              <div className="draw-preview">
+                <div className="draw-preview-item">
+                  <span className="draw-n">{players.length}</span>
+                  <span className="draw-l">Inscritos</span>
+                </div>
+                <span className="draw-arrow">→</span>
+                <div className="draw-preview-item">
+                  <span className="draw-n">{Math.floor(players.length / PLAYERS_PER_TEAM)}</span>
+                  <span className="draw-l">Times de {PLAYERS_PER_TEAM}</span>
+                </div>
+                {players.length % PLAYERS_PER_TEAM > 0 && (
+                  <>
+                    <span className="draw-arrow">+</span>
+                    <div className="draw-preview-item warn">
+                      <span className="draw-n">{players.length % PLAYERS_PER_TEAM}</span>
+                      <span className="draw-l">Fora</span>
+                    </div>
+                  </>
+                )}
+              </div>
+              <div className="pos-preview">
+                {POSITIONS.map(pos => (
+                  <span key={pos} className="pos-count">
+                    {pos}: <strong>{players.filter(p => p.position === pos).length}</strong>
+                  </span>
+                ))}
+              </div>
+              <p className="muted sm" style={{marginBottom:10}}>
+                O sorteio tenta equilibrar posições: 1 Armador + 1 Ala + 1 Pivô por time.
+              </p>
+              <button className="draw-btn" onClick={execDraw} disabled={players.length < MIN_PLAYERS}>
                 🎲 Realizar Sorteio
               </button>
+              {players.length < MIN_PLAYERS && (
+                <p className="muted sm" style={{textAlign:'center',marginTop:6}}>Mínimo {MIN_PLAYERS} inscritos</p>
+              )}
             </>
         }
       </div>
@@ -1190,6 +1272,15 @@ textarea.field-input{resize:vertical;}
 .gp-meta{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin-top:14px;}
 .gp-actions{display:flex;gap:8px;margin-top:14px;justify-content:flex-end;}
 .back-btn{background:var(--bg2);border:1px solid var(--border);color:var(--muted);padding:8px 15px;border-radius:8px;cursor:pointer;font-size:13px;margin-bottom:14px;}
+.draw-preview{display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap;}
+.draw-preview-item{background:var(--bg3);border-radius:8px;padding:10px 16px;text-align:center;min-width:80px;}
+.draw-preview-item.warn{background:rgba(249,115,22,.1);border:1px solid rgba(249,115,22,.3);}
+.draw-n{display:block;font-family:'Barlow Condensed',sans-serif;font-size:28px;font-weight:900;color:var(--accent);}
+.draw-l{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;}
+.draw-arrow{color:var(--muted);font-size:18px;font-weight:700;}
+.pos-preview{display:flex;gap:12px;margin-bottom:8px;flex-wrap:wrap;}
+.pos-count{font-size:12px;color:var(--muted);background:var(--bg3);padding:4px 10px;border-radius:20px;}
+.pos-count strong{color:var(--text);}
 .remove-btn{background:none;border:none;cursor:pointer;font-size:15px;padding:4px 6px;border-radius:4px;transition:background .15s;opacity:.5;}
 .remove-btn:hover{background:rgba(239,68,68,.15);opacity:1;}
 .confirm-overlay{position:fixed;inset:0;background:#0009;z-index:200;display:flex;align-items:center;justify-content:center;}
