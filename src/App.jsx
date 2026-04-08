@@ -311,6 +311,39 @@ export default function App() {
     notify('✅ Nome do time atualizado!')
   }
 
+  // ── REORDENAR JOGOS ──────────────────────────────────
+  const reorderGames = async (newOrder) => {
+    // newOrder = array de game ids na nova sequência
+    // Salva um campo `seq` em cada jogo para manter a ordem
+    const updates = newOrder.map((id, idx) => ({ id, seq: idx }))
+    for (const u of updates) {
+      await supabase.from('games').update({ seq: u.seq }).eq('id', u.id)
+    }
+    const reordered = newOrder.map(id => games.find(g => g.id === id)).filter(Boolean)
+    setGames(reordered)
+    notify('✅ Ordem salva!')
+  }
+
+  // Sugere ordem equilibrada: nenhum time joga 2x seguido
+  const suggestOrder = (gameList) => {
+    const pending = gameList.filter(g => g.status === 'pending')
+    const rest    = gameList.filter(g => g.status !== 'pending')
+    const result  = []
+    const pool    = [...pending]
+    let lastTeams = []
+
+    while (pool.length > 0) {
+      // Encontra jogo que não repete times do anterior
+      const idx = pool.findIndex(g =>
+        !lastTeams.includes(g.team_a.id) && !lastTeams.includes(g.team_b.id)
+      )
+      const pick = idx >= 0 ? pool.splice(idx, 1)[0] : pool.splice(0, 1)[0]
+      result.push(pick)
+      lastTeams = [pick.team_a.id, pick.team_b.id]
+    }
+    return [...result, ...rest]
+  }
+
   if (loading) return <Splash />
 
   return (
@@ -329,7 +362,7 @@ export default function App() {
               ? <AdminView players={players} teams={teams} games={games} deadline={deadline}
                   drawn={drawn} settings={settings} execDraw={execDraw}
                   saveGame={saveGame} saveSettings={saveSettings} saveDeadline={saveDeadline}
-                  removePlayer={removePlayer}
+                  removePlayer={removePlayer} reorderGames={reorderGames} suggestOrder={suggestOrder}
                   setView={setView} setActiveGame={setActiveGame} notify={notify} />
               : <AdminLogin correctPass={settings.admin_pass} onSuccess={() => setAdminOk(true)} />
           )}
@@ -702,7 +735,7 @@ function AdminLogin({ correctPass, onSuccess }) {
 /* ─────────────────────────────────────────────────────────────
    ADMIN VIEW
 ───────────────────────────────────────────────────────────── */
-function AdminView({ players, teams, games, deadline, drawn, settings, execDraw, saveGame, saveSettings, saveDeadline, removePlayer, setView, setActiveGame, notify }) {
+function AdminView({ players, teams, games, deadline, drawn, settings, execDraw, saveGame, saveSettings, saveDeadline, removePlayer, reorderGames, suggestOrder, setView, setActiveGame, notify }) {
   const [tab, setTab] = useState('dash')
   const TABS = [
     { k: 'dash', l: 'Dashboard' },
@@ -721,8 +754,8 @@ function AdminView({ players, teams, games, deadline, drawn, settings, execDraw,
       </div>
       {tab === 'dash'    && <AdminDash players={players} teams={teams} games={games} drawn={drawn} deadline={deadline} execDraw={execDraw} saveDeadline={saveDeadline} />}
       {tab === 'players' && <AdminPlayers players={players} teams={teams} removePlayer={removePlayer} drawn={drawn} notify={notify} />}
-      {tab === 'bracket' && <AdminBracket games={games} setView={setView} setActiveGame={setActiveGame} />}
-      {tab === 'teams'   && <AdminTeams teams={teams} players={players} games={games} />}
+      {tab === 'bracket' && <AdminBracket games={games} setView={setView} setActiveGame={setActiveGame} reorderGames={reorderGames} suggestOrder={suggestOrder} notify={notify} />}
+      {tab === 'teams'   && <AdminTeams teams={teams} players={players} games={games} eventName={settings.event_name} />}
       {tab === 'config'  && <AdminConfig settings={settings} saveSettings={saveSettings} />}
     </div>
   )
@@ -754,8 +787,30 @@ function AdminDash({ players, teams, games, drawn, deadline, execDraw, saveDeadl
       </div>
       <div className="card">
         <h3 className="card-title">🎲 Sorteio dos Times</h3>
-        {drawn
-          ? <p className="muted">✅ Sorteio realizado. {teams.length} times de {PLAYERS_PER_TEAM} jogadores.</p>
+        {(drawn || teams.length > 0)
+          ? <>
+              <div className="drawn-summary">
+                <span className="drawn-check">✅</span>
+                <div>
+                  <p style={{fontWeight:700,color:'#e8edf5',marginBottom:2}}>
+                    Sorteio realizado — {teams.length} times de {PLAYERS_PER_TEAM} jogadores
+                  </p>
+                  <p className="muted sm">A formação está travada. Para ver os times acesse a aba <strong>Times</strong>.</p>
+                </div>
+              </div>
+              <div className="drawn-teams-preview">
+                {teams.map(t => {
+                  const tp = players.filter(p => Array.isArray(t.players) && t.players.includes(p.id))
+                  return (
+                    <div key={t.id} className="drawn-team-pill" style={{'--tc': t.color}}>
+                      <span className="drawn-dot" style={{background: t.color}}/>
+                      <span className="drawn-tname">{t.name}</span>
+                      <span className="drawn-tplayers">{tp.map(p => p.name.split(' ')[0]).join(', ')}</span>
+                    </div>
+                  )
+                })}
+              </div>
+            </>
           : <>
               <div className="draw-preview">
                 <div className="draw-preview-item">
@@ -855,39 +910,166 @@ function AdminPlayers({ players, teams, removePlayer, drawn, notify }) {
   )
 }
 
-function AdminBracket({ games, setView, setActiveGame }) {
-  const sorted = [...games].sort((a, b) => {
-    const o = { live: 0, pending: 1, done: 2 }
-    return (o[a.status] ?? 3) - (o[b.status] ?? 3)
-  })
+function AdminBracket({ games, setView, setActiveGame, reorderGames, suggestOrder, notify }) {
+  const [order, setOrder]       = useState(null)  // null = usa games original
+  const [dragging, setDragging] = useState(null)
+  const [dragOver, setDragOver] = useState(null)
+  const [changed, setChanged]   = useState(false)
+
+  // Lista de trabalho: usa ordem local se existir
+  const list = order
+    ? order.map(id => games.find(g => g.id === id)).filter(Boolean)
+    : [...games].sort((a, b) => {
+        const o = { live: 0, pending: 1, done: 2 }
+        return (o[a.status] ?? 3) - (o[b.status] ?? 3)
+      })
+
+  // Detecta times repetidos consecutivamente
+  const consecutiveWarnings = new Set()
+  for (let i = 1; i < list.length; i++) {
+    const prev = list[i-1]
+    const curr = list[i]
+    if ([prev.team_a.id, prev.team_b.id].some(id =>
+      [curr.team_a.id, curr.team_b.id].includes(id)
+    )) consecutiveWarnings.add(i)
+  }
+
+  const handleDragStart = (id) => setDragging(id)
+  const handleDragOver  = (e, id) => { e.preventDefault(); setDragOver(id) }
+  const handleDrop      = (targetId) => {
+    if (!dragging || dragging === targetId) { setDragging(null); setDragOver(null); return }
+    const ids   = list.map(g => g.id)
+    const from  = ids.indexOf(dragging)
+    const to    = ids.indexOf(targetId)
+    const next  = [...ids]
+    next.splice(from, 1)
+    next.splice(to, 0, dragging)
+    setOrder(next)
+    setChanged(true)
+    setDragging(null)
+    setDragOver(null)
+  }
+
+  const handleSuggest = () => {
+    const suggested = suggestOrder(list)
+    setOrder(suggested.map(g => g.id))
+    setChanged(true)
+    notify('🔀 Ordem equilibrada sugerida! Revise e salve.')
+  }
+
+  const handleSave = async () => {
+    await reorderGames(order || list.map(g => g.id))
+    setChanged(false)
+    setOrder(null)
+  }
+
+  const handleReset = () => { setOrder(null); setChanged(false) }
+
+  const pendingCount = list.filter(g => g.status === 'pending').length
+
   return (
-    <div className="game-admin-list">
-      {sorted.map(g => (
-        <div key={g.id} className="admin-game-row" onClick={() => { setActiveGame(g.id); setView(V.GAME) }}>
-          <div className="agr-status">
-            <span className={`status-dot ${g.status === 'live' ? 'sdot-live' : g.status === 'done' ? 'sdot-done' : 'sdot-pending'}`} />
-            <span className="status-label">{g.status === 'done' ? 'FIM' : g.status === 'live' ? 'AO VIVO' : 'Aguard.'}</span>
-          </div>
-          <div className="agr-teams">
-            <div className="agr-team"><span className="team-dot" style={{ background: g.team_a.color }} />{g.team_a.name}</div>
-            <div className="agr-score">
-              {g.score_a !== null ? <>{g.score_a}<span className="score-sep">:</span>{g.score_b}</> : <span className="muted">–</span>}
-            </div>
-            <div className="agr-team right"><span className="team-dot" style={{ background: g.team_b.color }} />{g.team_b.name}</div>
-          </div>
-          <div className="agr-date">{g.game_date ? fmtDate(g.game_date) : 'Data a definir'}</div>
-          <div className="agr-edit">✏️</div>
+    <div>
+      {/* Toolbar */}
+      <div className="bracket-toolbar">
+        <div className="bracket-info">
+          <span className="muted">{list.length} jogos · {list.filter(g=>g.status==='done').length} finalizados</span>
+          {consecutiveWarnings.size > 0 && (
+            <span className="consec-warn">⚠️ {consecutiveWarnings.size} time(s) consecutivo(s)</span>
+          )}
         </div>
-      ))}
-      {sorted.length === 0 && <p className="muted" style={{ padding: '20px 0', textAlign: 'center' }}>Nenhum jogo criado ainda.</p>}
+        <div style={{display:'flex', gap:8, flexWrap:'wrap'}}>
+          {pendingCount > 1 && (
+            <button className="action-btn" onClick={handleSuggest}>
+              🔀 Sugerir ordem equilibrada
+            </button>
+          )}
+          {changed && (
+            <>
+              <button className="action-btn" style={{background:'rgba(34,197,94,.15)',borderColor:'#22c55e40',color:'#22c55e'}} onClick={handleSave}>
+                💾 Salvar ordem
+              </button>
+              <button className="action-btn" onClick={handleReset}>Cancelar</button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Lista reordenável */}
+      <div className="game-admin-list">
+        {list.map((g, i) => (
+          <div
+            key={g.id}
+            className={[
+              'admin-game-row',
+              dragging === g.id   ? 'dragging'  : '',
+              dragOver === g.id   ? 'drag-over' : '',
+              consecutiveWarnings.has(i) ? 'consec-row' : '',
+            ].join(' ')}
+            draggable={g.status === 'pending'}
+            onDragStart={() => handleDragStart(g.id)}
+            onDragOver={e  => handleDragOver(e, g.id)}
+            onDrop={() => handleDrop(g.id)}
+            onDragEnd={() => { setDragging(null); setDragOver(null) }}
+          >
+            {/* Número da sequência */}
+            <div className="agr-seq">{i + 1}</div>
+
+            {/* Handle de drag (só pendentes) */}
+            {g.status === 'pending'
+              ? <div className="drag-handle" title="Arrastar para reordenar">⠿</div>
+              : <div style={{width:20}}/>
+            }
+
+            <div className="agr-status">
+              <span className={`status-dot ${g.status === 'live' ? 'sdot-live' : g.status === 'done' ? 'sdot-done' : 'sdot-pending'}`} />
+              <span className="status-label">{g.status === 'done' ? 'FIM' : g.status === 'live' ? 'AO VIVO' : 'Aguard.'}</span>
+            </div>
+
+            <div className="agr-teams" onClick={() => { setActiveGame(g.id); setView(V.GAME) }} style={{cursor:'pointer',flex:1}}>
+              <div className="agr-team"><span className="team-dot" style={{ background: g.team_a.color }} />{g.team_a.name}</div>
+              <div className="agr-score">
+                {g.score_a !== null ? <>{g.score_a}<span className="score-sep">:</span>{g.score_b}</> : <span className="muted">–</span>}
+              </div>
+              <div className="agr-team right"><span className="team-dot" style={{ background: g.team_b.color }} />{g.team_b.name}</div>
+            </div>
+
+            <div className="agr-date">{g.game_date ? fmtDate(g.game_date) : 'Data a definir'}</div>
+            <div className="agr-edit" onClick={() => { setActiveGame(g.id); setView(V.GAME) }}>✏️</div>
+          </div>
+        ))}
+        {list.length === 0 && <p className="muted" style={{ padding: '20px 0', textAlign: 'center' }}>Nenhum jogo criado ainda.</p>}
+      </div>
     </div>
   )
 }
 
-function AdminTeams({ teams, players, games }) {
+function AdminTeams({ teams, players, games, eventName }) {
   const sorted = [...teams].sort((a, b) => (b.wins * 2 + b.draws) - (a.wins * 2 + a.draws))
+
+  const copyToClipboard = () => {
+    const lines = ['🏀 ' + (eventName || '3x3 Open') + ' — Formação dos Times', '']
+    sorted.forEach((t, i) => {
+      const tp = players.filter(p => Array.isArray(t.players) && t.players.includes(p.id))
+      lines.push(`${i+1}. ${t.name}`)
+      tp.forEach(p => lines.push(`   • ${p.name} (${p.position})`))
+      lines.push('')
+    })
+    lines.push('Consulte seu time em: ' + window.location.origin)
+    navigator.clipboard.writeText(lines.join('\n'))
+      .then(() => alert('✅ Lista copiada! Cole no WhatsApp ou onde quiser.'))
+      .catch(() => alert('Não foi possível copiar automaticamente.'))
+  }
+
   return (
-    <div className="team-cards-grid">
+    <div>
+      {teams.length > 0 && (
+        <div style={{display:'flex', justifyContent:'flex-end', marginBottom: 12}}>
+          <button className="action-btn" onClick={copyToClipboard}>
+            📋 Copiar lista para WhatsApp
+          </button>
+        </div>
+      )}
+      <div className="team-cards-grid">
       {sorted.map(t => {
         const tPlayers = players.filter(p => Array.isArray(t.players) && t.players.includes(p.id))
         const tGames   = games.filter(g => (g.team_a.id === t.id || g.team_b.id === t.id) && g.status === 'done')
@@ -932,6 +1114,7 @@ function AdminTeams({ teams, players, games }) {
         )
       })}
       {teams.length === 0 && <p className="muted" style={{ padding: '20px 0' }}>Sorteio ainda não realizado.</p>}
+    </div>
     </div>
   )
 }
@@ -1318,6 +1501,17 @@ textarea.field-input{resize:vertical;}
 .agr-score{font-family:'Barlow Condensed',sans-serif;font-size:20px;font-weight:900;color:var(--accent);text-align:center;min-width:50px;}
 .agr-date{font-size:11px;color:var(--muted);}
 .agr-edit{color:var(--muted);text-align:right;}
+.bracket-toolbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px;padding:12px 16px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;}
+.bracket-info{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+.consec-warn{font-size:12px;font-weight:700;color:#f59e0b;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);padding:3px 10px;border-radius:20px;}
+.agr-seq{font-family:'Barlow Condensed',sans-serif;font-size:18px;font-weight:900;color:var(--muted);min-width:24px;text-align:center;}
+.drag-handle{font-size:18px;color:var(--muted);cursor:grab;padding:0 4px;user-select:none;flex-shrink:0;}
+.drag-handle:active{cursor:grabbing;}
+.admin-game-row{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:11px 14px;transition:all .15s;display:grid;grid-template-columns:28px 20px 100px 1fr 120px 30px;align-items:center;gap:8px;}
+.admin-game-row.dragging{opacity:.4;border-style:dashed;}
+.admin-game-row.drag-over{border-color:var(--accent);background:rgba(249,115,22,.08);transform:scale(1.01);}
+.admin-game-row.consec-row{border-left:3px solid #f59e0b;}
+.admin-game-row:hover{border-color:rgba(249,115,22,.4);background:var(--bg3);}
 .team-cards-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(255px,1fr));gap:11px;}
 .team-admin-card{background:var(--bg2);border:1px solid var(--border);border-top:3px solid var(--tc);border-radius:12px;padding:15px;}
 .tac-header{display:flex;align-items:center;gap:8px;margin-bottom:9px;}
@@ -1390,6 +1584,13 @@ textarea.field-input{resize:vertical;}
 .roster-pos{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;background:rgba(255,255,255,.07);color:var(--muted);flex-shrink:0;}
 .roster-name{font-size:14px;font-weight:600;color:var(--text);flex:1;}
 .roster-you{font-size:11px;font-weight:700;color:var(--accent);background:rgba(249,115,22,.12);padding:2px 8px;border-radius:20px;flex-shrink:0;}
+.drawn-summary{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px;}
+.drawn-check{font-size:22px;flex-shrink:0;margin-top:2px;}
+.drawn-teams-preview{display:flex;flex-direction:column;gap:6px;}
+.drawn-team-pill{background:var(--bg3);border-left:3px solid var(--tc,#f97316);border-radius:8px;padding:9px 12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.drawn-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;}
+.drawn-tname{font-weight:700;font-size:13px;color:var(--text);min-width:110px;}
+.drawn-tplayers{font-size:12px;color:var(--muted);}
 .confirm-overlay{position:fixed;inset:0;background:#0009;z-index:200;display:flex;align-items:center;justify-content:center;}
 .confirm-box{background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:28px;max-width:380px;width:90%;box-shadow:0 20px 60px #000a;}
 .confirm-msg{font-size:16px;margin-bottom:6px;color:var(--text);}

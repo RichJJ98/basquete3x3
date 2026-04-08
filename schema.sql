@@ -57,7 +57,8 @@ create table if not exists games (
   status       text default 'pending',
   notes        text default '',
   elapsed_sec  int  default 0,
-  game_date    timestamptz
+  game_date    timestamptz,
+  seq          int default 0  -- ordem de exibição
 );
 
 -- ================================================================
