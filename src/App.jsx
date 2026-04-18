@@ -90,7 +90,7 @@ function buildRoundRobin(teams) {
 const V = { HOME: 'home', REG: 'reg', LOOKUP: 'lookup', ADMIN: 'admin', GAME: 'game' }
 
 function fmtDate(iso) {
-  return new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+  return new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -119,13 +119,14 @@ export default function App() {
   useEffect(() => {
     ;(async () => {
       try {
-        const [p, t, g, s, tour] = await Promise.all([
+        const [p, t, s, tour] = await Promise.all([
           dbAll('players'),
           dbAll('teams'),
-          dbAll('games'),
           dbGet('settings'),
           dbGet('tournament'),
         ])
+        // Load games ordered by seq then id
+        const { data: g } = await supabase.from('games').select('*').order('seq', { ascending: true }).order('id', { ascending: true })
         if (p) setPlayers(p)
         if (t) setTeams(t)
         if (g) setGames(g)
@@ -414,8 +415,8 @@ function HomeView({ teams, games, deadline, drawn, setView, eventName, venue }) 
   const sorted = [...teams].sort((a, b) =>
     (b.wins * 2 + b.draws) - (a.wins * 2 + a.draws) || (b.pf - b.pa) - (a.pf - a.pa)
   )
-  const upcoming = games.filter(g => g.status === 'pending' || g.status === 'live').slice(0, 6)
-  const recent   = games.filter(g => g.status === 'done').slice(-6).reverse()
+  const upcoming = [...games].sort((a,b) => (a.seq??99) - (b.seq??99)).filter(g => g.status === 'pending' || g.status === 'live').slice(0, 6)
+  const recent   = [...games].sort((a,b) => (a.seq??99) - (b.seq??99)).filter(g => g.status === 'done').slice(-6).reverse()
 
   return (
     <div className="page">
@@ -559,7 +560,7 @@ function LookupView({ players, teams, games, myName, setMyName, renameTeam }) {
   const teammates = team
     ? players.filter(p => team.players.includes(p.id) && p.id !== found?.id)
     : []
-  const myGames = team ? games.filter(g => g.team_a.id === team.id || g.team_b.id === team.id) : []
+  const myGames = team ? [...games].sort((a,b) => (a.seq??99)-(b.seq??99)).filter(g => g.team_a.id === team.id || g.team_b.id === team.id) : []
   const done    = myGames.filter(g => g.status === 'done')
   const next    = myGames.filter(g => g.status === 'pending' || g.status === 'live')
 
