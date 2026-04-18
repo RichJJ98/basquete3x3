@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Placar 3x3</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;700;900&family=DM+Sans:wght@400;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    /* ── Reset & Base ─────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:      #060d1a;
+      --bg2:     #0d1a2e;
+      --bg3:     #1a2744;
+      --border:  #1e3058;
+      --text:    #e8edf5;
+      --muted:   #4a6a90;
+      --accent:  #f97316;
+      --green:   #22c55e;
+      --red:     #ef4444;
+    }
+
+    html, body {
+      width: 100%; height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'DM Sans', sans-serif;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    /* ── Layout principal ─────────────────────────────── */
+    .screen {
+      width: 100vw; height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: 0;
+    }
+
+    /* ── Header ───────────────────────────────────────── */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 32px;
+      background: var(--bg2);
+      border-bottom: 2px solid var(--border);
+    }
+    .header-event {
+      font-family: 'Barlow Condensed', sans-serif;
+      font-size: 22px;
+      font-weight: 900;
+      letter-spacing: 1px;
+      color: var(--text);
+    }
+    .header-badge {
+      font-family: 'Barlow Condensed', sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      padding: 4px 14px;
+      border-radius: 20px;
+    }
+    .header-time {
+      font-family: 'Barlow Condensed', sans-serif;
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--muted);
+      letter-spacing: 1px;
+    }
+
+    /* ── Scoreboard central ───────────────────────────── */
+    .scoreboard {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      padding: 0 40px;
+      gap: 20px;
+      position: relative;
+    }
+
+    /* grade de fundo sutil */
+    .scoreboard::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image:
+        repeating-linear-gradient(0deg, transparent, transparent 60px, rgba(255,255,255,.015) 60px, rgba(255,255,255,.015) 61px),
+        repeating-linear-gradient(90deg, transparent, transparent 60px, rgba(255,255,255,.015) 60px, rgba(255,255,255,.015) 61px);
+      pointer-events: none;
+    }
+
+    /* ── Time block ───────────────────────────────────── */
+    .team-block {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .team-color-bar {
+      width: 100%;
+      height: 5px;
+      border-radius: 3px;
+      margin-bottom: 4px;
+    }
+
+    .team-name {
+      font-family: 'Barlow Condensed', sans-serif;
+      font-size: clamp(36px, 5vw, 64px);
+      font-weight: 900;
+      letter-spacing: -1px;
+      text-align: center;
+      line-height: 1;
+    }
+
+    .team-score {
+      font-family: 'Barlow Condensed', sans-serif;
+      font-size: clamp(120px, 18vw, 220px);
+      font-weight: 900;
+      line-height: 1;
+      color: var(--accent);
+      text-shadow: 0 0 80px rgba(249,115,22,.3);
+      transition: transform .15s ease, color .2s;
+    }
+
+    .team-score.scored {
+      transform: scale(1.08);
+      color: #fff;
+    }
+
+    .team-meta {
+      display: flex;
+      gap: 24px;
+      align-items: center;
+    }
+
+    .meta-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .meta-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--muted);
+    }
+
+    .meta-value {
+      font-family: 'Barlow Condensed', sans-serif;
+      font-size: 28px;
+      font-weight: 900;
+      color: var(--text);
+    }
+
+    .meta-value.warn { color: var(--red); }
+
+    .fouls-pips {
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+      justify-content: center;
+      max-width: 120px;
+    }
+
+    .pip {
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      transition: background .2s;
+    }
+    .pip.active { background: var(--red); border-color: var(--red); }
+
+    .timeout-pips { display: flex; gap: 6px; }
+    .tpip {
+      width: 14px; height: 14px;
+      border-radius: 3px;
+      background: var(--accent);
+      transition: opacity .2s;
+    }
+    .tpip.used { background: var(--bg3); border: 1px solid var(--border); }
+
+    /* ── Centro ───────────────────────────────────────── */
+    .center-block {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      position: relative;
+      z-index: 1;
+      min-width: 180px;
+    }
+
+    .vs-sep {
+      font-family: 'Barlow Condensed', sans-serif;
+      font-size: clamp(60px, 8vw, 100px);
+      font-weight: 900;
+      color: var(--border);
+      line-height: 1;
+    }
+
+    /* Timer */
+    .timer-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .timer {
+      font-family: 'Barlow Condensed', sans-serif;
+      font-size: clamp(40px, 6vw, 72px);
+      font-weight: 900;
+      letter-spacing: 4px;
+      color: var(--text);
+      transition: color .3s;
+    }
+    .timer.warning { color: var(--accent); animation: pulse-timer 1s ease-in-out infinite; }
+    .timer.overtime { color: var(--red); }
+
+    @keyframes pulse-timer {
+      0%, 100% { opacity: 1; }
+      50% { opacity: .6; }
+    }
+
+    .timer-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .ot-badge {
+      background: rgba(239,68,68,.2);
+      border: 1px solid var(--red);
+      color: var(--red);
+      font-family: 'Barlow Condensed', sans-serif;
+      font-size: 14px;
+      font-weight: 900;
+      letter-spacing: 2px;
+      padding: 3px 12px;
+      border-radius: 4px;
+    }
+
+    /* Status badge */
+    .status-badge {
+      font-family: 'Barlow Condensed', sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      padding: 5px 14px;
+      border-radius: 20px;
+    }
+    .status-live    { background: rgba(34,197,94,.15); color: var(--green); border: 1px solid rgba(34,197,94,.4); animation: pulse-live 2s ease-in-out infinite; }
+    .status-pending { background: rgba(74,106,144,.15); color: var(--muted); border: 1px solid var(--border); }
+    .status-done    { background: rgba(249,115,22,.15); color: var(--accent); border: 1px solid rgba(249,115,22,.4); }
+
+    @keyframes pulse-live {
+      0%,100% { box-shadow: 0 0 0 0 rgba(34,197,94,.3); }
+      50%      { box-shadow: 0 0 0 8px rgba(34,197,94,0); }
+    }
+
+    /* ── Footer ───────────────────────────────────────── */
+    .footer {
+      padding: 12px 32px;
+      background: var(--bg2);
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .footer-notes {
+      font-size: 14px;
+      color: var(--muted);
+      font-style: italic;
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .footer-venue {
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .footer-conn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .conn-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+    }
+    .conn-dot.off { background: var(--red); }
+
+    /* ── Idle screen ──────────────────────────────────── */
+    .idle-screen {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      gap: 20px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .idle-ball {
+      font-size: 80px;
+      animation: bounce 2s ease-in-out infinite;
+    }
+    @keyframes bounce {
+      0%,100% { transform: translateY(0); }
+      50% { transform: translateY(-20px); }
+    }
+
+    .idle-title {
+      font-family: 'Barlow Condensed', sans-serif;
+      font-size: 48px;
+      font-weight: 900;
+      color: var(--text);
+      letter-spacing: -1px;
+    }
+
+    .idle-sub {
+      font-size: 16px;
+      color: var(--muted);
+    }
+
+    /* glow de fundo */
+    .bg-glow {
+      position: fixed;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      width: 600px; height: 600px;
+      background: radial-gradient(circle, rgba(249,115,22,.08) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
+    /* ── Animação de entrada de placar ────────────────── */
+    @keyframes score-flash {
+      0%   { background: rgba(249,115,22,.3); }
+      100% { background: transparent; }
+    }
+    .score-flash { animation: score-flash .6s ease-out; }
+  </style>
+</head>
+<body>
+
+<div class="bg-glow"></div>
+
+<div class="screen" id="screen">
+  <!-- preenchido pelo JS -->
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════
+// ⚙️  COLE SUAS CREDENCIAIS AQUI (as mesmas do src/supabase.js)
+// ══════════════════════════════════════════════════════
+const SUPABASE_URL  = 'https://hnvwglylbcwraaosaflh.supabase.co'
+const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhudndnbHlsYmN3cmFhb3NhZmxoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ0NzIyNzMsImV4cCI6MjA5MDA0ODI3M30.2jPRIgFUIhjeXduPpmEXGjHEZKhfNQoCX-dxUudup7I'
+// ══════════════════════════════════════════════════════
+
+const { createClient } = supabase
+const db = createClient(SUPABASE_URL, SUPABASE_ANON)
+
+// ── Estado ────────────────────────────────────────────
+let state = {
+  game:      null,   // jogo ao vivo ou mais recente
+  settings:  { event_name: '3x3 Open', venue: '' },
+  connected: false,
+  localTimer: 0,
+  timerInterval: null,
+  prevScoreA: 0,
+  prevScoreB: 0,
+}
+
+// ── Inicialização ─────────────────────────────────────
+async function init() {
+  // Carrega settings
+  const { data: s } = await db.from('settings').select('*').eq('id','main').single()
+  if (s) state.settings = s
+
+  // Carrega jogo ao vivo ou último jogo
+  await loadActiveGame()
+
+  // Realtime — escuta mudanças nos jogos
+  db.channel('scoreboard')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'games' }, async payload => {
+      const g = payload.new
+      // Atualiza se for o jogo atual ou se virou live
+      if (g.status === 'live' || (state.game && g.id === state.game.id)) {
+        const prevA = state.game?.score_a ?? 0
+        const prevB = state.game?.score_b ?? 0
+        state.game = g
+        // Sincroniza timer com o elapsed do banco
+        syncTimer(g)
+        // Detecta ponto marcado para animação
+        if ((g.score_a ?? 0) > prevA) flashScore('a')
+        if ((g.score_b ?? 0) > prevB) flashScore('b')
+        render()
+      }
+      // Se não tinha jogo e apareceu um live, carrega
+      if (!state.game && g.status === 'live') {
+        state.game = g
+        syncTimer(g)
+        render()
+      }
+    })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'settings' }, payload => {
+      state.settings = payload.new
+      render()
+    })
+    .subscribe(status => {
+      state.connected = (status === 'SUBSCRIBED')
+      render()
+    })
+
+  render()
+}
+
+async function loadActiveGame() {
+  // Prefere jogo ao vivo
+  let { data } = await db.from('games').select('*').eq('status','live').limit(1)
+  if (data && data.length > 0) {
+    state.game = data[0]
+    syncTimer(data[0])
+    return
+  }
+  // Senão pega o último jogo pendente
+  const { data: pending } = await db.from('games').select('*').eq('status','pending').limit(1)
+  if (pending && pending.length > 0) { state.game = pending[0]; return }
+  // Senão pega o último finalizado
+  const { data: done } = await db.from('games').select('*').eq('status','done').order('id',{ascending:false}).limit(1)
+  if (done && done.length > 0) state.game = done[0]
+}
+
+// ── Timer local (conta junto com o jogo) ─────────────
+function syncTimer(g) {
+  clearInterval(state.timerInterval)
+  state.localTimer = g.elapsed_sec || 0
+  if (g.status === 'live') {
+    state.timerInterval = setInterval(() => {
+      state.localTimer++
+      renderTimer()
+    }, 1000)
+  }
+}
+
+function fmtTimer(sec) {
+  const m = String(Math.floor(sec / 60)).padStart(2,'0')
+  const s = String(sec % 60).padStart(2,'0')
+  return `${m}:${s}`
+}
+
+// ── Flash de ponto ────────────────────────────────────
+function flashScore(side) {
+  const el = document.getElementById('score-' + side)
+  if (!el) return
+  el.classList.remove('scored')
+  void el.offsetWidth // reflow
+  el.classList.add('scored')
+  setTimeout(() => el.classList.remove('scored'), 400)
+}
+
+// ── Render ────────────────────────────────────────────
+function render() {
+  const screen = document.getElementById('screen')
+  const g = state.game
+  const s = state.settings
+  const now = new Date().toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'})
+
+  screen.innerHTML = `
+    <!-- Header -->
+    <div class="header">
+      <div class="header-event">🏀 ${s.event_name || '3x3 Open'}</div>
+      <div class="header-badge">FIBA 3×3</div>
+      <div class="header-time">${now}</div>
+    </div>
+
+    <!-- Scoreboard -->
+    <div class="scoreboard">
+      ${g ? renderGame(g) : renderIdle()}
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      <div class="footer-notes">${g?.notes ? '💬 ' + g.notes : ''}</div>
+      <div class="footer-venue">${s.venue ? '📍 ' + s.venue : ''}</div>
+      <div class="footer-conn">
+        <div class="conn-dot ${state.connected ? '' : 'off'}"></div>
+        ${state.connected ? 'Conectado' : 'Reconectando...'}
+      </div>
+    </div>
+  `
+}
+
+function renderGame(g) {
+  const t = state.localTimer
+  const isLive    = g.status === 'live'
+  const isDone    = g.status === 'done'
+  const isPending = g.status === 'pending'
+  const overTime  = t >= 600
+  const warning   = t >= 480 && t < 600 // últimos 2 min
+
+  const timerClass = overTime ? 'overtime' : warning ? 'warning' : ''
+  const statusLabel = isLive ? '🔴 AO VIVO' : isDone ? 'FINALIZADO' : 'AGUARDANDO'
+  const statusClass = isLive ? 'status-live' : isDone ? 'status-done' : 'status-pending'
+
+  const scoreA = g.score_a ?? 0
+  const scoreB = g.score_b ?? 0
+  const foulsA = g.fouls_a ?? 0
+  const foulsB = g.fouls_b ?? 0
+  const toA    = g.timeouts_a ?? 1
+  const toB    = g.timeouts_b ?? 1
+
+  return `
+    <!-- Time A -->
+    <div class="team-block">
+      <div class="team-color-bar" style="background:${g.team_a.color}"></div>
+      <div class="team-name" style="color:${g.team_a.color}">${g.team_a.name}</div>
+      <div class="team-score" id="score-a">${scoreA}</div>
+      <div class="team-meta">
+        <div class="meta-item">
+          <div class="meta-label">Faltas</div>
+          <div class="fouls-pips">${renderPips(foulsA, 6)}</div>
+          <div class="meta-value ${foulsA >= 6 ? 'warn' : ''}">${foulsA}</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">Timeout</div>
+          <div class="timeout-pips">${renderTPips(toA, 1)}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Centro -->
+    <div class="center-block">
+      <div class="status-badge ${statusClass}">${statusLabel}</div>
+      <div class="vs-sep">:</div>
+      <div class="timer-wrap">
+        <div class="timer ${timerClass}">${fmtTimer(t)}</div>
+        <div class="timer-label">${overTime ? 'OVERTIME' : isPending ? 'TEMPO' : 'TEMPO'}</div>
+        ${overTime ? '<div class="ot-badge">OT</div>' : ''}
+      </div>
+      ${g.game_date ? `<div style="font-size:12px;color:var(--muted);margin-top:4px">${fmtDate(g.game_date)}</div>` : ''}
+    </div>
+
+    <!-- Time B -->
+    <div class="team-block">
+      <div class="team-color-bar" style="background:${g.team_b.color}"></div>
+      <div class="team-name" style="color:${g.team_b.color}">${g.team_b.name}</div>
+      <div class="team-score" id="score-b">${scoreB}</div>
+      <div class="team-meta">
+        <div class="meta-item">
+          <div class="meta-label">Faltas</div>
+          <div class="fouls-pips">${renderPips(foulsB, 6)}</div>
+          <div class="meta-value ${foulsB >= 6 ? 'warn' : ''}">${foulsB}</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">Timeout</div>
+          <div class="timeout-pips">${renderTPips(toB, 1)}</div>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderIdle() {
+  return `
+    <div></div>
+    <div class="idle-screen">
+      <div class="idle-ball">🏀</div>
+      <div class="idle-title">${state.settings.event_name || '3x3 Open'}</div>
+      <div class="idle-sub">Aguardando início do jogo...</div>
+    </div>
+    <div></div>
+  `
+}
+
+function renderPips(count, max) {
+  return Array.from({length: max}, (_, i) =>
+    `<div class="pip ${i < count ? 'active' : ''}"></div>`
+  ).join('')
+}
+
+function renderTPips(remaining, max) {
+  return Array.from({length: max}, (_, i) =>
+    `<div class="tpip ${i >= remaining ? 'used' : ''}"></div>`
+  ).join('')
+}
+
+function renderTimer() {
+  const el = document.getElementById('score-a') // usado como proxy para saber se o DOM existe
+  if (!el) return
+  const t = state.localTimer
+  const overTime = t >= 600
+  const warning  = t >= 480 && t < 600
+  const timerEl  = document.querySelector('.timer')
+  const labelEl  = document.querySelector('.timer-label')
+  if (!timerEl) return
+  timerEl.textContent = fmtTimer(t)
+  timerEl.className   = 'timer ' + (overTime ? 'overtime' : warning ? 'warning' : '')
+  if (labelEl) labelEl.textContent = overTime ? 'OVERTIME' : 'TEMPO'
+}
+
+function fmtDate(iso) {
+  return new Date(iso).toLocaleString('pt-BR', {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'})
+}
+
+// Atualiza horário no header a cada minuto
+setInterval(() => {
+  const el = document.querySelector('.header-time')
+  if (el) el.textContent = new Date().toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'})
+}, 30000)
+
+// Inicia
+init()
+</script>
+</body>
+</html>
