@@ -81,6 +81,7 @@ function buildRoundRobin(teams) {
         fouls_a: 0, fouls_b: 0,
         timeouts_a: FIBA.timeoutsPerTeam, timeouts_b: FIBA.timeoutsPerTeam,
         game_date: null, status: 'pending', notes: '', elapsed_sec: 0,
+        player_fouls_a: [0,0,0], player_fouls_b: [0,0,0], wo: null,
       })
     }
   }
@@ -216,6 +217,9 @@ export default function App() {
       notes: patch.notes,
       elapsed_sec: patch.elapsed_sec,
       game_date: patch.game_date,
+      player_fouls_a: patch.player_fouls_a || [0,0,0],
+      player_fouls_b: patch.player_fouls_b || [0,0,0],
+      wo: patch.wo || null,
     }
     await supabase.from('games').update(row).eq('id', patch.id)
     setGames(prev => prev.map(g => g.id === patch.id ? patch : g))
@@ -372,7 +376,9 @@ export default function App() {
               game={games.find(g => g.id === activeGame)}
               saveGame={saveGame}
               back={() => setView(V.ADMIN)}
-              notify={notify} />
+              notify={notify}
+              allPlayers={players}
+              allTeams={teams} />
           )}
         </main>
       </div>
@@ -1165,23 +1171,24 @@ function AdminConfig({ settings, saveSettings }) {
 /* ─────────────────────────────────────────────────────────────
    GAME PANEL
 ───────────────────────────────────────────────────────────── */
-function GamePanel({ game, saveGame, back, notify }) {
-  const [g, setG] = useState(game
-    ? { ...game, score_a: game.score_a ?? 0, score_b: game.score_b ?? 0 }
-    : null
-  )
-  const [timer, setTimer] = useState(game?.elapsed_sec || 0)
+function GamePanel({ game, saveGame, back, notify, allPlayers, allTeams }) {
+  const [g, setG] = useState(game ? {
+    ...game,
+    score_a: game.score_a ?? 0,
+    score_b: game.score_b ?? 0,
+    player_fouls_a: game.player_fouls_a || [0,0,0],
+    player_fouls_b: game.player_fouls_b || [0,0,0],
+    wo: game.wo || null,
+  } : null)
+  const [timer, setTimer]   = useState(game?.elapsed_sec || 0)
   const [running, setRunning] = useState(false)
+  const [showWO, setShowWO]   = useState(false)
   const ref = useRef(null)
 
   useEffect(() => {
     if (running) {
       ref.current = setInterval(() => {
-        setTimer(t => {
-          const n = t + 1
-          setG(p => ({ ...p, elapsed_sec: n }))
-          return n
-        })
+        setTimer(t => { const n=t+1; setG(p=>({...p,elapsed_sec:n})); return n })
       }, 1000)
     } else clearInterval(ref.current)
     return () => clearInterval(ref.current)
@@ -1189,9 +1196,28 @@ function GamePanel({ game, saveGame, back, notify }) {
 
   if (!g) return <div className="page"><button className="back-btn" onClick={back}>← Voltar</button></div>
 
-  const p  = (k, v) => setG(prev => ({ ...prev, [k]: v }))
-  const inc = (k, by = 1) => setG(prev => ({ ...prev, [k]: (prev[k] ?? 0) + by }))
-  const dec = (k) => setG(prev => ({ ...prev, [k]: Math.max(0, (prev[k] ?? 0) - 1) }))
+  // Get players for each team
+  const teamAPlayers = allTeams?.find(t => t.id === g.team_a.id)
+  const teamBPlayers = allTeams?.find(t => t.id === g.team_b.id)
+  const playersA = allPlayers?.filter(p => Array.isArray(teamAPlayers?.players) && teamAPlayers.players.includes(p.id)) || []
+  const playersB = allPlayers?.filter(p => Array.isArray(teamBPlayers?.players) && teamBPlayers.players.includes(p.id)) || []
+
+  const pv = (k, v) => setG(prev => ({ ...prev, [k]: v }))
+  const inc = (k, by=1) => setG(prev => ({ ...prev, [k]: (prev[k]??0)+by }))
+  const dec = (k) => setG(prev => ({ ...prev, [k]: Math.max(0,(prev[k]??0)-1) }))
+
+  const incPlayerFoul = (side, idx) => setG(prev => {
+    const arr = [...(prev[`player_fouls_${side}`] || [0,0,0])]
+    arr[idx] = (arr[idx]||0)+1
+    const teamFouls = arr.reduce((a,b)=>a+b,0)
+    return { ...prev, [`player_fouls_${side}`]: arr, [`fouls_${side}`]: teamFouls }
+  })
+  const decPlayerFoul = (side, idx) => setG(prev => {
+    const arr = [...(prev[`player_fouls_${side}`] || [0,0,0])]
+    arr[idx] = Math.max(0,(arr[idx]||0)-1)
+    const teamFouls = arr.reduce((a,b)=>a+b,0)
+    return { ...prev, [`player_fouls_${side}`]: arr, [`fouls_${side}`]: teamFouls }
+  })
 
   const handleSave   = async () => { await saveGame(g); notify('💾 Salvo!') }
   const handleFinish = async () => {
@@ -1203,61 +1229,129 @@ function GamePanel({ game, saveGame, back, notify }) {
     const l = { ...g, status: 'live' }
     setG(l); await saveGame(l); setRunning(true); notify('▶ Jogo iniciado!')
   }
+  const handleWO = async (loserSide) => {
+    setRunning(false)
+    const wo = { ...g, status: 'done', wo: loserSide,
+      score_a: loserSide === 'a' ? 0 : 10,
+      score_b: loserSide === 'b' ? 0 : 10,
+    }
+    setG(wo); await saveGame(wo)
+    notify(`🚫 W.O. — ${loserSide === 'a' ? g.team_a.name : g.team_b.name} não compareceu`)
+    setShowWO(false); back()
+  }
 
-  const mm = String(Math.floor(timer / 60)).padStart(2, '0')
-  const ss = String(timer % 60).padStart(2, '0')
+  const mm = String(Math.floor(timer/60)).padStart(2,'0')
+  const ss = String(timer%60).padStart(2,'0')
   const overTime = timer >= FIBA.winTime
 
   return (
     <div className="page">
       <button className="back-btn" onClick={back}>← Voltar</button>
-      <div className="game-panel">
 
+      {/* W.O. Modal */}
+      {showWO && (
+        <div className="confirm-overlay">
+          <div className="confirm-box">
+            <h3 style={{marginBottom:8,color:'#e2e8f0'}}>🚫 Declarar W.O.</h3>
+            <p className="muted" style={{marginBottom:16}}>Qual time não compareceu?</p>
+            <div className="confirm-btns" style={{flexDirection:'column',gap:8}}>
+              <button className="action-btn danger" onClick={() => handleWO('a')}>{g.team_a.name} não compareceu</button>
+              <button className="action-btn danger" onClick={() => handleWO('b')}>{g.team_b.name} não compareceu</button>
+              <button className="action-btn" onClick={() => setShowWO(false)}>Cancelar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="game-panel">
+        {/* Header */}
         <div className="gp-header">
           <div className="gp-status-row">
-            <span className={`gp-status ${g.status === 'live' ? 'st-live' : g.status === 'done' ? 'st-done' : 'st-pending'}`}>
-              {g.status === 'done' ? 'FINALIZADO' : g.status === 'live' ? '🔴 AO VIVO' : 'AGUARDANDO'}
+            <span className={`gp-status ${g.status==='live'?'st-live':g.status==='done'?'st-done':'st-pending'}`}>
+              {g.wo ? '🚫 W.O.' : g.status==='done' ? 'FINALIZADO' : g.status==='live' ? '🔴 AO VIVO' : 'AGUARDANDO'}
             </span>
-            <div className="gp-timer" style={{ color: overTime ? '#f97316' : '#e2e8f0' }}>
-              {mm}:{ss}{overTime && <span className="ot-badge">OT</span>}
+            <div className="gp-timer" style={{color:overTime?'#f97316':'#e2e8f0'}}>
+              {mm}:{ss}{overTime&&<span className="ot-badge">OT</span>}
             </div>
-            <div style={{ display: 'flex', gap: 6 }}>
-              {g.status !== 'done' && (
+            <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+              {g.status!=='done'&&(
                 !running
-                  ? <button className="ctrl-btn green" onClick={g.status === 'live' ? () => setRunning(true) : handleLive}>
-                      {g.status === 'live' ? '▶' : '▶ Iniciar'}
+                  ? <button className="ctrl-btn green" onClick={g.status==='live'?()=>setRunning(true):handleLive}>
+                      {g.status==='live'?'▶':'▶ Iniciar'}
                     </button>
-                  : <button className="ctrl-btn yellow" onClick={() => setRunning(false)}>⏸</button>
+                  : <button className="ctrl-btn yellow" onClick={()=>setRunning(false)}>⏸</button>
+              )}
+              {g.status!=='done'&&(
+                <button className="ctrl-btn" style={{background:'#7c3aed'}} onClick={()=>setShowWO(true)}>🚫 W.O.</button>
               )}
             </div>
           </div>
         </div>
 
+        {/* Scoreboard */}
         <div className="gp-scoreboard">
           <ScoreBlock
             label={g.team_a.name} color={g.team_a.color}
             score={g.score_a} fouls={g.fouls_a} timeouts={g.timeouts_a}
-            on1={() => inc('score_a', 1)} on2={() => inc('score_a', 2)} onFT={() => inc('score_a', 1)}
-            onFoul={() => inc('fouls_a')} onFoulDec={() => dec('fouls_a')}
-            onTimeout={() => p('timeouts_a', Math.max(0, g.timeouts_a - 1))}
-            onMinus={() => dec('score_a')} />
+            on1={()=>inc('score_a',1)} on2={()=>inc('score_a',2)} onFT={()=>inc('score_a',1)}
+            onFoul={()=>inc('fouls_a')} onFoulDec={()=>dec('fouls_a')}
+            onTimeout={()=>pv('timeouts_a',Math.max(0,g.timeouts_a-1))}
+            onMinus={()=>dec('score_a')} />
           <div className="gp-center">
-            <div className="gp-big-score">{g.score_a ?? 0}</div>
+            <div className="gp-big-score">{g.score_a??0}</div>
             <div className="gp-colon">:</div>
-            <div className="gp-big-score">{g.score_b ?? 0}</div>
+            <div className="gp-big-score">{g.score_b??0}</div>
           </div>
           <ScoreBlock
             label={g.team_b.name} color={g.team_b.color}
             score={g.score_b} fouls={g.fouls_b} timeouts={g.timeouts_b}
-            on1={() => inc('score_b', 1)} on2={() => inc('score_b', 2)} onFT={() => inc('score_b', 1)}
-            onFoul={() => inc('fouls_b')} onFoulDec={() => dec('fouls_b')}
-            onTimeout={() => p('timeouts_b', Math.max(0, g.timeouts_b - 1))}
-            onMinus={() => dec('score_b')} />
+            on1={()=>inc('score_b',1)} on2={()=>inc('score_b',2)} onFT={()=>inc('score_b',1)}
+            onFoul={()=>inc('fouls_b')} onFoulDec={()=>dec('fouls_b')}
+            onTimeout={()=>pv('timeouts_b',Math.max(0,g.timeouts_b-1))}
+            onMinus={()=>dec('score_b')} />
         </div>
 
-        {(g.fouls_a >= FIBA.foulsLimit || g.fouls_b >= FIBA.foulsLimit) && (
+        {(g.fouls_a>=FIBA.foulsLimit||g.fouls_b>=FIBA.foulsLimit)&&(
           <div className="foul-warning">
-            ⚠️ {g.fouls_a >= FIBA.foulsLimit ? g.team_a.name : ''}{g.fouls_a >= FIBA.foulsLimit && g.fouls_b >= FIBA.foulsLimit ? ' e ' : ''}{g.fouls_b >= FIBA.foulsLimit ? g.team_b.name : ''} — limite de faltas (lances livres)
+            ⚠️ {g.fouls_a>=FIBA.foulsLimit?g.team_a.name:''}{g.fouls_a>=FIBA.foulsLimit&&g.fouls_b>=FIBA.foulsLimit?' e ':''}{g.fouls_b>=FIBA.foulsLimit?g.team_b.name:''} — limite de faltas (lances livres)
+          </div>
+        )}
+
+        {/* Faltas por jogador */}
+        {(playersA.length>0||playersB.length>0)&&(
+          <div className="player-fouls-section">
+            <div className="pf-label">🟥 Faltas por Jogador</div>
+            <div className="pf-grid">
+              <div className="pf-team">
+                {playersA.map((p,i)=>(
+                  <div key={p.id} className={`pf-row${(g.player_fouls_a[i]||0)>=2?' pf-warn':''}`}>
+                    <span className="pf-name">{p.name.split(' ')[0]}</span>
+                    <span className="pf-pos">{p.position.slice(0,3)}</span>
+                    <div className="pf-counter">
+                      <button className="counter-btn" onClick={()=>decPlayerFoul('a',i)}>-</button>
+                      <span className="pf-count">{g.player_fouls_a[i]||0}</span>
+                      <button className="counter-btn" onClick={()=>incPlayerFoul('a',i)}>+</button>
+                    </div>
+                    {(g.player_fouls_a[i]||0)>=2&&<span className="pf-badge">⚠️ 2F</span>}
+                  </div>
+                ))}
+              </div>
+              <div className="pf-divider"/>
+              <div className="pf-team">
+                {playersB.map((p,i)=>(
+                  <div key={p.id} className={`pf-row${(g.player_fouls_b[i]||0)>=2?' pf-warn':''}`}>
+                    <span className="pf-name">{p.name.split(' ')[0]}</span>
+                    <span className="pf-pos">{p.position.slice(0,3)}</span>
+                    <div className="pf-counter">
+                      <button className="counter-btn" onClick={()=>decPlayerFoul('b',i)}>-</button>
+                      <span className="pf-count">{g.player_fouls_b[i]||0}</span>
+                      <button className="counter-btn" onClick={()=>incPlayerFoul('b',i)}>+</button>
+                    </div>
+                    {(g.player_fouls_b[i]||0)>=2&&<span className="pf-badge">⚠️ 2F</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         )}
 
@@ -1265,19 +1359,19 @@ function GamePanel({ game, saveGame, back, notify }) {
           <div className="field">
             <label className="field-label">Data e Hora</label>
             <input className="field-input" type="datetime-local"
-              value={g.game_date?.slice(0, 16) || ''}
-              onChange={e => p('game_date', new Date(e.target.value).toISOString())} />
+              value={g.game_date?.slice(0,16)||''}
+              onChange={e=>pv('game_date',new Date(e.target.value).toISOString())}/>
           </div>
           <div className="field">
             <label className="field-label">Observações / Fatos do Jogo</label>
             <textarea className="field-input" rows={3} placeholder="Destaque, incidentes, MVPs..."
-              value={g.notes || ''} onChange={e => p('notes', e.target.value)} />
+              value={g.notes||''} onChange={e=>pv('notes',e.target.value)}/>
           </div>
         </div>
 
         <div className="gp-actions">
           <button className="action-btn" onClick={handleSave}>💾 Salvar</button>
-          {g.status !== 'done' && (
+          {g.status!=='done'&&(
             <button className="action-btn danger" onClick={handleFinish}>✅ Finalizar Jogo</button>
           )}
         </div>
@@ -1563,6 +1657,20 @@ textarea.field-input{resize:vertical;}
 .gp-meta{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin-top:14px;}
 .gp-actions{display:flex;gap:8px;margin-top:14px;justify-content:flex-end;}
 .back-btn{background:var(--bg2);border:1px solid var(--border);color:var(--muted);padding:8px 15px;border-radius:8px;cursor:pointer;font-size:13px;margin-bottom:14px;}
+.player-fouls-section{background:var(--bg3);border-radius:12px;padding:14px;margin:10px 0;}
+.pf-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:10px;}
+.pf-grid{display:grid;grid-template-columns:1fr 1px 1fr;gap:12px;align-items:start;}
+.pf-divider{background:var(--border);width:1px;align-self:stretch;}
+.pf-team{display:flex;flex-direction:column;gap:6px;}
+.pf-row{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:7px;background:var(--bg2);transition:background .15s;}
+.pf-row.pf-warn{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.25);}
+.pf-name{font-size:13px;font-weight:600;color:var(--text);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.pf-pos{font-size:10px;color:var(--muted);background:var(--bg3);padding:1px 5px;border-radius:3px;flex-shrink:0;}
+.pf-counter{display:flex;align-items:center;gap:4px;flex-shrink:0;}
+.pf-count{font-family:'Barlow Condensed',sans-serif;font-size:18px;font-weight:900;color:var(--text);min-width:18px;text-align:center;}
+.pf-row.pf-warn .pf-count{color:var(--red);}
+.pf-badge{font-size:11px;font-weight:700;color:var(--red);flex-shrink:0;}
+.wo-badge{background:rgba(124,58,237,.15);border:1px solid rgba(124,58,237,.4);color:#a78bfa;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;}
 .draw-preview{display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap;}
 .draw-preview-item{background:var(--bg3);border-radius:8px;padding:10px 16px;text-align:center;min-width:80px;}
 .draw-preview-item.warn{background:rgba(249,115,22,.1);border:1px solid rgba(249,115,22,.3);}
