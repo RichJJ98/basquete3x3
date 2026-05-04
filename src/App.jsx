@@ -104,7 +104,7 @@ export default function App() {
   const [games, setGames]       = useState([])
   const [deadline, setDeadline] = useState(null)
   const [drawn, setDrawn]       = useState(false)
-  const [settings, setSettings] = useState({ event_name: '3x3 Open', venue: '', admin_pass: 'admin123' })
+  const [settings, setSettings] = useState({ event_name: '3x3 Open', venue: '', admin_pass: 'admin123', entry_fee: 0, pix_key: '', pix_name: '', registration_open: true })
   const [adminOk, setAdminOk]   = useState(false)
   const [activeGame, setActiveGame] = useState(null)
   const [toast, setToast]       = useState(null)
@@ -270,9 +270,10 @@ export default function App() {
   const addPlayer = async (name, pos) => {
     if (drawn) { notify('Sorteio já realizado', 'err'); return }
     if (deadline && Date.now() >= new Date(deadline).getTime()) { notify('Inscrições encerradas', 'err'); return }
+    if (settings.registration_open === false) { notify('Inscrições encerradas pelo organizador', 'err'); return }
     if (players.find(p => p.name.trim().toLowerCase() === name.trim().toLowerCase())) { notify('Nome já inscrito', 'err'); return }
 
-    const p = { id: uid(), name: name.trim(), position: pos, created_at: new Date().toISOString() }
+    const p = { id: uid(), name: name.trim(), position: pos, paid: false, created_at: new Date().toISOString() }
     const { error } = await supabase.from('players').insert(p)
     if (error) { notify('Erro ao salvar inscrição', 'err'); return }
 
@@ -281,6 +282,35 @@ export default function App() {
     localStorage.setItem('b3x3:name', p.name)
     notify('✅ Inscrito com sucesso!')
     setView(V.LOOKUP)
+  }
+
+  // ── TOGGLE PAGAMENTO ─────────────────────────────────
+  const togglePaid = async (id) => {
+    const player = players.find(p => p.id === id)
+    if (!player) return
+    const paid = !player.paid
+    await supabase.from('players').update({ paid }).eq('id', id)
+    setPlayers(prev => prev.map(p => p.id === id ? { ...p, paid } : p))
+    notify(paid ? '✅ Pagamento confirmado!' : '↩️ Pagamento removido')
+  }
+
+  // ── RESET CAMPEONATO ─────────────────────────────────
+  const resetTournament = async () => {
+    // Arquiva resultado atual em settings antes de limpar
+    const summary = {
+      archived_at: new Date().toISOString(),
+      event: settings.event_name,
+      teams: teams.map(t => ({ name: t.name, wins: t.wins, losses: t.losses, pf: t.pf, pa: t.pa }))
+    }
+    await supabase.from('settings').update({ last_edition: JSON.stringify(summary) }).eq('id', 'main')
+    // Limpa jogos, times e reseta torneio
+    await supabase.from('games').delete().neq('id', 'x')
+    await supabase.from('teams').delete().neq('id', 'x')
+    await supabase.from('players').delete().neq('id', 'x')
+    await supabase.from('tournament').update({ drawn: false, deadline: null }).eq('id', 'main')
+    setGames([]); setTeams([]); setPlayers([])
+    setDrawn(false); setDeadline(null)
+    notify('🆕 Novo campeonato iniciado!')
   }
 
   // ── REMOVER JOGADOR ───────────────────────────────────────
@@ -360,7 +390,7 @@ export default function App() {
           {toast && <Toast toast={toast} />}
 
           {view === V.HOME   && <HomeView teams={teams} games={games} deadline={deadline} drawn={drawn} setView={setView} eventName={settings.event_name} venue={settings.venue} />}
-          {view === V.REG    && <RegisterView addPlayer={addPlayer} deadline={deadline} drawn={drawn} />}
+          {view === V.REG    && <RegisterView addPlayer={addPlayer} deadline={deadline} drawn={drawn} settings={settings} />}
           {view === V.LOOKUP && <LookupView players={players} teams={teams} games={games} myName={myName} setMyName={setMyName} renameTeam={renameTeam} />}
           {view === V.ADMIN  && (
             adminOk
@@ -368,6 +398,7 @@ export default function App() {
                   drawn={drawn} settings={settings} execDraw={execDraw}
                   saveGame={saveGame} saveSettings={saveSettings} saveDeadline={saveDeadline}
                   removePlayer={removePlayer} reorderGames={reorderGames} suggestOrder={suggestOrder}
+                  togglePaid={togglePaid} resetTournament={resetTournament}
                   setView={setView} setActiveGame={setActiveGame} notify={notify} />
               : <AdminLogin correctPass={settings.admin_pass} onSuccess={() => setAdminOk(true)} />
           )}
@@ -502,16 +533,20 @@ function HeroStat({ n, label }) {
 /* ─────────────────────────────────────────────────────────────
    REGISTER
 ───────────────────────────────────────────────────────────── */
-function RegisterView({ addPlayer, deadline, drawn }) {
-  const [name, setName] = useState('')
-  const [pos, setPos]   = useState('Armador')
+function RegisterView({ addPlayer, deadline, drawn, settings }) {
+  const [name, setName]     = useState('')
+  const [pos, setPos]       = useState('Armador')
   const [loading, setLoading] = useState(false)
   const isPast = deadline && Date.now() >= new Date(deadline).getTime()
+  const hasFee = settings?.entry_fee > 0
+  const pixKey  = settings?.pix_key
+  const pixName = settings?.pix_name
+  const regOpen = settings?.registration_open !== false
 
-  if (drawn || isPast) return (
+  if (drawn || isPast || !regOpen) return (
     <div className="page"><div className="card center-card">
       <div className="card-icon">{drawn ? '🎲' : '⏰'}</div>
-      <h2>{drawn ? 'Sorteio Realizado' : 'Prazo Encerrado'}</h2>
+      <h2>{drawn ? 'Sorteio Realizado' : 'Inscrições Encerradas'}</h2>
       <p className="muted">{drawn ? 'Os times já foram formados. Consulte na aba Meu Time.' : 'O período de inscrições foi encerrado.'}</p>
     </div></div>
   )
@@ -524,29 +559,56 @@ function RegisterView({ addPlayer, deadline, drawn }) {
   }
 
   return (
-    <div className="page"><div className="card center-card">
-      <div className="card-icon">📝</div>
-      <h2>Inscrição</h2>
-      <p className="muted" style={{ marginBottom: 20 }}>Preencha seus dados para participar do torneio.</p>
-      <div className="field">
-        <label className="field-label">Nome completo</label>
-        <input className="field-input" placeholder="Seu nome" value={name}
-          onChange={e => setName(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && handle()} />
-      </div>
-      <div className="field">
-        <label className="field-label">Posição</label>
-        <div className="pos-picker">
-          {POSITIONS.map(p => (
-            <button key={p} className={`pos-opt${pos === p ? ' active' : ''}`} onClick={() => setPos(p)}>{p}</button>
-          ))}
+    <div className="page">
+      <div className="card center-card">
+        <div className="card-icon">📝</div>
+        <h2>Inscrição</h2>
+        <p className="muted" style={{ marginBottom: 20 }}>Preencha seus dados para participar do torneio.</p>
+
+        <div className="field">
+          <label className="field-label">Nome completo</label>
+          <input className="field-input" placeholder="Seu nome" value={name}
+            onChange={e => setName(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handle()} />
         </div>
+
+        <div className="field">
+          <label className="field-label">Posição</label>
+          <div className="pos-picker">
+            {POSITIONS.map(p => (
+              <button key={p} className={`pos-opt${pos === p ? ' active' : ''}`} onClick={() => setPos(p)}>{p}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* Pix payment info */}
+        {hasFee && (
+          <div className="pix-box">
+            <div className="pix-header">
+              <span className="pix-icon">💸</span>
+              <div>
+                <div className="pix-title">Taxa de inscrição</div>
+                <div className="pix-value">R$ {Number(settings.entry_fee).toFixed(2).replace('.',',')}</div>
+              </div>
+            </div>
+            {pixKey && (
+              <div className="pix-key-box">
+                <div className="pix-key-label">Chave Pix {pixName ? `— ${pixName}` : ''}</div>
+                <div className="pix-key-value" onClick={() => {
+                  navigator.clipboard?.writeText(pixKey)
+                }}>{pixKey} <span className="pix-copy">📋 copiar</span></div>
+              </div>
+            )}
+            <p className="pix-note">⚠️ Envie o comprovante pelo WhatsApp ao organizador após se inscrever. Sua inscrição será confirmada após verificação do pagamento.</p>
+          </div>
+        )}
+
+        <button className="submit-btn" onClick={handle} disabled={loading || !name.trim()}>
+          {loading ? 'Salvando...' : hasFee ? `Inscrever-se · R$ ${Number(settings.entry_fee).toFixed(2).replace('.',',')}` : 'Confirmar Inscrição'}
+        </button>
+        {deadline && <p className="deadline-note">Prazo: {fmtDate(deadline)}</p>}
       </div>
-      <button className="submit-btn" onClick={handle} disabled={loading || !name.trim()}>
-        {loading ? 'Salvando...' : 'Confirmar Inscrição'}
-      </button>
-      {deadline && <p className="deadline-note">Prazo: {fmtDate(deadline)}</p>}
-    </div></div>
+    </div>
   )
 }
 
@@ -742,7 +804,7 @@ function AdminLogin({ correctPass, onSuccess }) {
 /* ─────────────────────────────────────────────────────────────
    ADMIN VIEW
 ───────────────────────────────────────────────────────────── */
-function AdminView({ players, teams, games, deadline, drawn, settings, execDraw, saveGame, saveSettings, saveDeadline, removePlayer, reorderGames, suggestOrder, setView, setActiveGame, notify }) {
+function AdminView({ players, teams, games, deadline, drawn, settings, execDraw, saveGame, saveSettings, saveDeadline, removePlayer, reorderGames, suggestOrder, togglePaid, resetTournament, setView, setActiveGame, notify }) {
   const [tab, setTab] = useState('dash')
   const TABS = [
     { k: 'dash', l: 'Dashboard' },
@@ -760,10 +822,10 @@ function AdminView({ players, teams, games, deadline, drawn, settings, execDraw,
         ))}
       </div>
       {tab === 'dash'    && <AdminDash players={players} teams={teams} games={games} drawn={drawn} deadline={deadline} execDraw={execDraw} saveDeadline={saveDeadline} />}
-      {tab === 'players' && <AdminPlayers players={players} teams={teams} removePlayer={removePlayer} drawn={drawn} notify={notify} />}
+      {tab === 'players' && <AdminPlayers players={players} teams={teams} removePlayer={removePlayer} togglePaid={togglePaid} drawn={drawn} notify={notify} settings={settings} />}
       {tab === 'bracket' && <AdminBracket games={games} setView={setView} setActiveGame={setActiveGame} reorderGames={reorderGames} suggestOrder={suggestOrder} notify={notify} />}
       {tab === 'teams'   && <AdminTeams teams={teams} players={players} games={games} eventName={settings.event_name} />}
-      {tab === 'config'  && <AdminConfig settings={settings} saveSettings={saveSettings} />}
+      {tab === 'config'  && <AdminConfig settings={settings} saveSettings={saveSettings} resetTournament={resetTournament} notify={notify} />}
     </div>
   )
 }
@@ -862,8 +924,11 @@ function AdminDash({ players, teams, games, drawn, deadline, execDraw, saveDeadl
   )
 }
 
-function AdminPlayers({ players, teams, removePlayer, drawn, notify }) {
+function AdminPlayers({ players, teams, removePlayer, togglePaid, drawn, notify, settings }) {
   const [confirmId, setConfirmId] = useState(null)
+  const hasFee = settings?.entry_fee > 0
+  const paidCount = players.filter(p => p.paid).length
+  const totalFee = paidCount * (settings?.entry_fee || 0)
 
   const handleRemove = (id) => {
     if (drawn) { notify('Não é possível remover após o sorteio', 'err'); return }
@@ -886,18 +951,52 @@ function AdminPlayers({ players, teams, removePlayer, drawn, notify }) {
           </div>
         </div>
       )}
+
+      {/* Payment summary */}
+      {hasFee && (
+        <div className="payment-summary">
+          <div className="pay-stat">
+            <span className="pay-stat-n">{paidCount}/{players.length}</span>
+            <span className="pay-stat-l">Pagamentos confirmados</span>
+          </div>
+          <div className="pay-stat">
+            <span className="pay-stat-n" style={{color:'#22c55e'}}>R$ {totalFee.toFixed(2).replace('.',',')}</span>
+            <span className="pay-stat-l">Total arrecadado</span>
+          </div>
+          <div className="pay-stat">
+            <span className="pay-stat-n" style={{color:'#ef4444'}}>{players.length - paidCount}</span>
+            <span className="pay-stat-l">Pendentes</span>
+          </div>
+        </div>
+      )}
+
       <div className="table-wrap">
         <table className="data-table">
-          <thead><tr><th>#</th><th>Nome</th><th>Posição</th><th>Time</th><th>Inscrito em</th><th></th></tr></thead>
+          <thead><tr>
+            <th>#</th><th>Nome</th><th>Posição</th><th>Time</th>
+            {hasFee && <th>Pagamento</th>}
+            <th>Inscrito em</th><th></th>
+          </tr></thead>
           <tbody>
             {players.map((p, i) => {
               const t = teams.find(t => Array.isArray(t.players) && t.players.includes(p.id))
               return (
-                <tr key={p.id}>
+                <tr key={p.id} className={hasFee && !p.paid ? 'row-unpaid' : ''}>
                   <td className="muted">{i + 1}</td>
                   <td><strong>{p.name}</strong></td>
                   <td><span className="pos-badge">{p.position}</span></td>
                   <td>{t ? <><span className="team-dot" style={{ background: t.color }} />{t.name}</> : '—'}</td>
+                  {hasFee && (
+                    <td>
+                      <button
+                        className={`paid-btn${p.paid ? ' paid' : ' unpaid'}`}
+                        onClick={() => togglePaid(p.id)}
+                        title={p.paid ? 'Clique para remover pagamento' : 'Clique para confirmar pagamento'}
+                      >
+                        {p.paid ? '✅ Pago' : '⏳ Pendente'}
+                      </button>
+                    </td>
+                  )}
                   <td className="muted sm">{new Date(p.created_at).toLocaleDateString('pt-BR')}</td>
                   <td>
                     {!drawn && (
@@ -1126,33 +1225,91 @@ function AdminTeams({ teams, players, games, eventName }) {
   )
 }
 
-function AdminConfig({ settings, saveSettings }) {
-  const [s, setS] = useState({ ...settings })
+function AdminConfig({ settings, saveSettings, resetTournament, notify }) {
+  const [s, setS]           = useState({ ...settings })
+  const [showReset, setShowReset] = useState(false)
+
+  // Sync if settings change externally
+  useState(() => { setS({ ...settings }) }, [settings])
+
+  const handleReset = async () => {
+    await resetTournament()
+    setShowReset(false)
+  }
+
   return (
-    <div className="card">
-      <h3 className="card-title">⚙️ Configurações do Evento</h3>
-      {[
-        { k: 'event_name', l: 'Nome do Evento', ph: 'ex: 3x3 Open Verão' },
-        { k: 'venue', l: 'Local / Quadra', ph: 'ex: Ginásio Central' },
-        { k: 'admin_pass', l: 'Senha do Admin', ph: '••••••' },
-      ].map(({ k, l, ph }) => (
-        <div key={k} className="field">
-          <label className="field-label">{l}</label>
-          <input className="field-input" placeholder={ph} value={s[k] || ''}
-            type={k === 'admin_pass' ? 'password' : 'text'}
-            onChange={e => setS(prev => ({ ...prev, [k]: e.target.value }))} />
+    <div>
+      {showReset && (
+        <div className="confirm-overlay">
+          <div className="confirm-box">
+            <p className="confirm-msg">⚠️ Iniciar novo campeonato?</p>
+            <p className="muted" style={{ marginBottom: 16 }}>
+              Todos os jogadores, times e jogos serão apagados. Os resultados do campeonato atual serão arquivados.
+            </p>
+            <div className="confirm-btns">
+              <button className="action-btn" onClick={() => setShowReset(false)}>Cancelar</button>
+              <button className="action-btn danger" onClick={handleReset}>Confirmar Reset</button>
+            </div>
+          </div>
         </div>
-      ))}
-      <div className="fiba-box">
-        <h4 className="fiba-title">📋 Regras FIBA 3×3 (referência)</h4>
+      )}
+
+      <div className="card">
+        <h3 className="card-title">🎪 Configurações do Evento</h3>
+        {[
+          { k: 'event_name', l: 'Nome do Evento', ph: 'ex: 3x3 Open Verão 2026', type: 'text' },
+          { k: 'venue', l: 'Local / Quadra', ph: 'ex: Ginásio Central', type: 'text' },
+          { k: 'admin_pass', l: 'Senha do Admin', ph: '••••••', type: 'password' },
+        ].map(({ k, l, ph, type }) => (
+          <div key={k} className="field">
+            <label className="field-label">{l}</label>
+            <input className="field-input" placeholder={ph} value={s[k] || ''} type={type}
+              onChange={e => setS(prev => ({ ...prev, [k]: e.target.value }))} />
+          </div>
+        ))}
+      </div>
+
+      <div className="card">
+        <h3 className="card-title">💸 Inscrição Paga</h3>
+        <div className="field">
+          <label className="field-label">Valor da inscrição (R$) — 0 para gratuita</label>
+          <input className="field-input" type="number" min="0" step="1" placeholder="0"
+            value={s.entry_fee || 0}
+            onChange={e => setS(prev => ({ ...prev, entry_fee: Number(e.target.value) }))} />
+        </div>
+        <div className="field">
+          <label className="field-label">Chave Pix</label>
+          <input className="field-input" placeholder="CPF, e-mail, telefone ou chave aleatória"
+            value={s.pix_key || ''} onChange={e => setS(prev => ({ ...prev, pix_key: e.target.value }))} />
+        </div>
+        <div className="field">
+          <label className="field-label">Nome do recebedor (aparece na tela de inscrição)</label>
+          <input className="field-input" placeholder="ex: João Silva"
+            value={s.pix_name || ''} onChange={e => setS(prev => ({ ...prev, pix_name: e.target.value }))} />
+        </div>
+        <div className="field">
+          <label className="field-label">Inscrições abertas</label>
+          <div className="toggle-row">
+            <button
+              className={`toggle-btn${s.registration_open !== false ? ' on' : ''}`}
+              onClick={() => setS(prev => ({ ...prev, registration_open: !(prev.registration_open !== false) }))}>
+              {s.registration_open !== false ? '✅ Abertas' : '🔒 Fechadas'}
+            </button>
+            <span className="muted sm">Controla se novos jogadores podem se inscrever</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <h3 className="card-title">📋 Regras FIBA 3×3</h3>
         <div className="fiba-grid">
           {[
-            ['Vitória', 'Primeiro a 21 pts OU maior placar em 10 min regulamentares'],
-            ['Pontuação', 'Arremesso dentro do arco = 1pt · Além do arco = 2pts · Lance livre = 1pt'],
-            ['Overtime', 'Se empate no tempo: jogo até o primeiro ponto marcado'],
-            ['Timeout', '1 por time por partida (não acumulável)'],
-            ['Faltas', '6 faltas de equipe → lances livres a partir daí'],
-            ['Posse', 'Início: cara ou coroa · Após cesta: adversário recebe bola atrás do arco'],
+            ['Vitória', 'Primeiro a 21 pts OU maior placar em 10 min'],
+            ['Pontuação', 'Dentro do arco = 1pt · Além do arco = 2pts · LB = 1pt'],
+            ['Overtime', 'Empate no tempo → primeiro ponto vence'],
+            ['Timeout', '1 por time por partida'],
+            ['Faltas', '6 faltas de equipe → lances livres'],
+            ['Posse', 'Início: sorteio · Após cesta: adversário atrás do arco'],
           ].map(([k, v]) => (
             <div key={k} className="fiba-rule">
               <span className="fiba-key">{k}</span>
@@ -1161,9 +1318,20 @@ function AdminConfig({ settings, saveSettings }) {
           ))}
         </div>
       </div>
-      <button className="submit-btn" style={{ marginTop: 16 }} onClick={() => saveSettings(s)}>
-        Salvar Configurações
+
+      <button className="submit-btn" onClick={() => saveSettings(s)}>
+        💾 Salvar Configurações
       </button>
+
+      <div className="card" style={{ marginTop: 16, borderColor: 'rgba(239,68,68,.3)' }}>
+        <h3 className="card-title" style={{ color: '#ef4444' }}>🆕 Novo Campeonato</h3>
+        <p className="muted" style={{ marginBottom: 12 }}>
+          Arquiva o campeonato atual e começa do zero. Jogadores, times e jogos serão apagados.
+        </p>
+        <button className="action-btn danger" style={{ width: '100%' }} onClick={() => setShowReset(true)}>
+          Iniciar Novo Campeonato
+        </button>
+      </div>
     </div>
   )
 }
@@ -1693,6 +1861,28 @@ textarea.field-input{resize:vertical;}
 .roster-pos{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;background:rgba(255,255,255,.07);color:var(--muted);flex-shrink:0;}
 .roster-name{font-size:14px;font-weight:600;color:var(--text);flex:1;}
 .roster-you{font-size:11px;font-weight:700;color:var(--accent);background:rgba(249,115,22,.12);padding:2px 8px;border-radius:20px;flex-shrink:0;}
+.pix-box{background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.25);border-radius:12px;padding:14px;margin:14px 0;}
+.pix-header{display:flex;align-items:center;gap:12px;margin-bottom:10px;}
+.pix-icon{font-size:28px;}
+.pix-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--muted);}
+.pix-value{font-family:'Barlow Condensed',sans-serif;font-size:24px;font-weight:900;color:#22c55e;}
+.pix-key-box{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px;cursor:pointer;}
+.pix-key-label{font-size:11px;color:var(--muted);margin-bottom:3px;}
+.pix-key-value{font-size:14px;font-weight:700;color:var(--text);display:flex;align-items:center;justify-content:space-between;gap:8px;word-break:break-all;}
+.pix-copy{font-size:11px;color:var(--accent);flex-shrink:0;}
+.pix-note{font-size:11px;color:var(--muted);line-height:1.5;}
+.payment-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px;}
+.pay-stat{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:12px;text-align:center;}
+.pay-stat-n{display:block;font-family:'Barlow Condensed',sans-serif;font-size:28px;font-weight:900;color:var(--accent);}
+.pay-stat-l{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-top:2px;}
+.paid-btn{border:none;padding:5px 12px;border-radius:20px;font-size:12px;font-weight:700;cursor:pointer;transition:all .15s;}
+.paid-btn.paid{background:rgba(34,197,94,.15);color:#22c55e;border:1px solid rgba(34,197,94,.3);}
+.paid-btn.unpaid{background:rgba(239,68,68,.1);color:#ef4444;border:1px solid rgba(239,68,68,.25);}
+.paid-btn:hover{opacity:.8;}
+.row-unpaid td{opacity:.7;}
+.toggle-row{display:flex;align-items:center;gap:12px;}
+.toggle-btn{background:var(--bg3);border:1px solid var(--border);color:var(--muted);padding:8px 16px;border-radius:8px;cursor:pointer;font-weight:700;font-size:13px;transition:all .15s;}
+.toggle-btn.on{background:rgba(34,197,94,.15);border-color:rgba(34,197,94,.4);color:#22c55e;}
 .drawn-summary{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px;}
 .drawn-check{font-size:22px;flex-shrink:0;margin-top:2px;}
 .drawn-teams-preview{display:flex;flex-direction:column;gap:6px;}
