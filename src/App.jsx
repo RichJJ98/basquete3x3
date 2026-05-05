@@ -90,6 +90,10 @@ function buildRoundRobin(teams) {
 
 const V = { HOME: 'home', REG: 'reg', LOOKUP: 'lookup', ADMIN: 'admin', GAME: 'game' }
 
+function genCode() {
+  return '3X3-' + Math.random().toString(36).slice(2,6).toUpperCase()
+}
+
 function fmtDate(iso) {
   return new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })
 }
@@ -110,6 +114,7 @@ export default function App() {
   const [toast, setToast]       = useState(null)
   const [loading, setLoading]   = useState(true)
   const [myName, setMyName]     = useState(() => localStorage.getItem('b3x3:name') || '')
+  const [registrations, setRegistrations] = useState([]) // pending team registrations
 
   const notify = (msg, type = 'ok') => {
     setToast({ msg, type })
@@ -136,6 +141,9 @@ export default function App() {
           setDeadline(tour.deadline)
           setDrawn(tour.drawn)
         }
+        // Load pending registrations
+        const { data: regs } = await supabase.from('team_registrations').select('*').order('created_at', { ascending: false })
+        if (regs) setRegistrations(regs)
       } catch (e) {
         notify('Erro ao conectar com banco de dados', 'err')
       }
@@ -313,6 +321,52 @@ export default function App() {
     notify('🆕 Novo campeonato iniciado!')
   }
 
+  // ── SUBMETER INSCRIÇÃO DE TIME ───────────────────────────
+  const submitTeamRegistration = async (teamName, players3, receiptBase64, receiptType) => {
+    if (!settings.registration_open) { notify('Inscrições encerradas', 'err'); return false }
+    const code = genCode()
+    const reg = {
+      id: uid(),
+      code,
+      team_name: teamName.trim(),
+      players: players3, // [{name, position}]
+      receipt_img: receiptBase64,
+      receipt_type: receiptType,
+      status: 'pending',
+      created_at: new Date().toISOString(),
+    }
+    const { error } = await supabase.from('team_registrations').insert(reg)
+    if (error) { notify('Erro ao enviar inscrição', 'err'); return false }
+    setRegistrations(prev => [reg, ...prev])
+    return code
+  }
+
+  // ── APROVAR INSCRIÇÃO ─────────────────────────────────────
+  const approveRegistration = async (regId) => {
+    const reg = registrations.find(r => r.id === regId)
+    if (!reg) return
+    // Insert players
+    const newPlayers = reg.players.map(p => ({
+      id: uid(), name: p.name.trim(), position: p.position, paid: true,
+      created_at: new Date().toISOString(),
+    }))
+    for (const p of newPlayers) {
+      await supabase.from('players').insert(p)
+    }
+    setPlayers(prev => [...prev, ...newPlayers])
+    // Mark registration as approved
+    await supabase.from('team_registrations').update({ status: 'approved' }).eq('id', regId)
+    setRegistrations(prev => prev.map(r => r.id === regId ? { ...r, status: 'approved' } : r))
+    notify(`✅ Time "${reg.team_name}" aprovado! ${newPlayers.length} jogadores adicionados.`)
+  }
+
+  // ── RECUSAR INSCRIÇÃO ─────────────────────────────────────
+  const rejectRegistration = async (regId, reason = '') => {
+    await supabase.from('team_registrations').update({ status: 'rejected', reject_reason: reason }).eq('id', regId)
+    setRegistrations(prev => prev.map(r => r.id === regId ? { ...r, status: 'rejected' } : r))
+    notify('❌ Inscrição recusada.')
+  }
+
   // ── REMOVER JOGADOR ───────────────────────────────────────
   const removePlayer = async (id) => {
     const { error } = await supabase.from('players').delete().eq('id', id)
@@ -390,7 +444,7 @@ export default function App() {
           {toast && <Toast toast={toast} />}
 
           {view === V.HOME   && <HomeView teams={teams} games={games} deadline={deadline} drawn={drawn} setView={setView} eventName={settings.event_name} venue={settings.venue} />}
-          {view === V.REG    && <RegisterView addPlayer={addPlayer} deadline={deadline} drawn={drawn} settings={settings} />}
+          {view === V.REG    && <RegisterView submitTeamRegistration={submitTeamRegistration} deadline={deadline} drawn={drawn} settings={settings} />}
           {view === V.LOOKUP && <LookupView players={players} teams={teams} games={games} myName={myName} setMyName={setMyName} renameTeam={renameTeam} />}
           {view === V.ADMIN  && (
             adminOk
@@ -399,6 +453,9 @@ export default function App() {
                   saveGame={saveGame} saveSettings={saveSettings} saveDeadline={saveDeadline}
                   removePlayer={removePlayer} reorderGames={reorderGames} suggestOrder={suggestOrder}
                   togglePaid={togglePaid} resetTournament={resetTournament}
+                  registrations={registrations}
+                  approveRegistration={approveRegistration}
+                  rejectRegistration={rejectRegistration}
                   setView={setView} setActiveGame={setActiveGame} notify={notify} />
               : <AdminLogin correctPass={settings.admin_pass} onSuccess={() => setAdminOk(true)} />
           )}
@@ -533,81 +590,202 @@ function HeroStat({ n, label }) {
 /* ─────────────────────────────────────────────────────────────
    REGISTER
 ───────────────────────────────────────────────────────────── */
-function RegisterView({ addPlayer, deadline, drawn, settings }) {
-  const [name, setName]     = useState('')
-  const [pos, setPos]       = useState('Armador')
-  const [loading, setLoading] = useState(false)
-  const isPast = deadline && Date.now() >= new Date(deadline).getTime()
-  const hasFee = settings?.entry_fee > 0
+function RegisterView({ submitTeamRegistration, deadline, drawn, settings }) {
+  const [teamName, setTeamName] = useState('')
+  const [players3, setPlayers3] = useState([
+    { name: '', position: 'Armador' },
+    { name: '', position: 'Ala' },
+    { name: '', position: 'Pivô' },
+  ])
+  const [receipt, setReceipt]   = useState(null)
+  const [receiptType, setReceiptType] = useState('')
+  const [loading, setLoading]   = useState(false)
+  const [code, setCode]         = useState(null)
+  const [step, setStep]         = useState(1) // 1=form 2=pix 3=receipt 4=done
+  const fileRef = useRef(null)
+
+  const isPast  = deadline && Date.now() >= new Date(deadline).getTime()
+  const regOpen = settings?.registration_open !== false
+  const hasFee  = settings?.entry_fee > 0
   const pixKey  = settings?.pix_key
   const pixName = settings?.pix_name
-  const regOpen = settings?.registration_open !== false
+  const fee     = Number(settings?.entry_fee || 0)
 
   if (drawn || isPast || !regOpen) return (
     <div className="page"><div className="card center-card">
       <div className="card-icon">{drawn ? '🎲' : '⏰'}</div>
       <h2>{drawn ? 'Sorteio Realizado' : 'Inscrições Encerradas'}</h2>
-      <p className="muted">{drawn ? 'Os times já foram formados. Consulte na aba Meu Time.' : 'O período de inscrições foi encerrado.'}</p>
+      <p className="muted">{drawn ? 'Times já foram formados.' : 'O período de inscrições foi encerrado.'}</p>
     </div></div>
   )
 
-  const handle = async () => {
-    if (!name.trim()) return
-    setLoading(true)
-    await addPlayer(name, pos)
-    setLoading(false)
+  const setPlayer = (i, field, val) => setPlayers3(prev => {
+    const next = [...prev]; next[i] = { ...next[i], [field]: val }; return next
+  })
+
+  const handleFileChange = (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = ev => {
+      setReceipt(ev.target.result.split(',')[1])
+      setReceiptType(file.type)
+    }
+    reader.readAsDataURL(file)
   }
+
+  const handleSubmitForm = () => {
+    if (!teamName.trim()) { return }
+    if (players3.some(p => !p.name.trim())) { return }
+    if (hasFee && pixKey) { setStep(2) }
+    else { setStep(3) }
+  }
+
+  const handleSubmitReceipt = async () => {
+    if (hasFee && !receipt) { return }
+    setLoading(true)
+    const result = await submitTeamRegistration(teamName, players3, receipt, receiptType)
+    setLoading(false)
+    if (result) { setCode(result); setStep(4) }
+  }
+
+  // Step 4 - Done
+  if (step === 4) return (
+    <div className="page"><div className="card center-card">
+      <div className="card-icon">🎉</div>
+      <h2>Inscrição Enviada!</h2>
+      <div className="reg-code-box">
+        <div className="reg-code-label">Código da sua inscrição</div>
+        <div className="reg-code">{code}</div>
+        <div className="reg-code-note">Guarde esse código. Você será notificado após a confirmação do pagamento.</div>
+      </div>
+      {hasFee && <p className="muted" style={{marginTop:12,fontSize:12}}>⏳ Sua inscrição ficará pendente até o admin confirmar o comprovante enviado.</p>}
+    </div></div>
+  )
 
   return (
     <div className="page">
-      <div className="card center-card">
-        <div className="card-icon">📝</div>
-        <h2>Inscrição</h2>
-        <p className="muted" style={{ marginBottom: 20 }}>Preencha seus dados para participar do torneio.</p>
-
-        <div className="field">
-          <label className="field-label">Nome completo</label>
-          <input className="field-input" placeholder="Seu nome" value={name}
-            onChange={e => setName(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && handle()} />
-        </div>
-
-        <div className="field">
-          <label className="field-label">Posição</label>
-          <div className="pos-picker">
-            {POSITIONS.map(p => (
-              <button key={p} className={`pos-opt${pos === p ? ' active' : ''}`} onClick={() => setPos(p)}>{p}</button>
-            ))}
+      {/* Step indicator */}
+      <div className="reg-steps">
+        {(hasFee ? ['Dados do Time','Pagamento','Comprovante'] : ['Dados do Time','Confirmar']).map((s,i) => (
+          <div key={i} className={`reg-step${step===i+1?' active':step>i+1?' done':''}`}>
+            <div className="reg-step-dot">{step>i+1?'✓':i+1}</div>
+            <div className="reg-step-label">{s}</div>
           </div>
-        </div>
+        ))}
+      </div>
 
-        {/* Pix payment info */}
-        {hasFee && (
+      {/* Step 1 - Team form */}
+      {step === 1 && (
+        <div className="card">
+          <h2 className="card-title">📝 Inscrição do Time</h2>
+          <p className="muted" style={{marginBottom:16}}>Um capitão preenche os dados de todos os 3 jogadores.</p>
+
+          <div className="field">
+            <label className="field-label">Nome do Time</label>
+            <input className="field-input" placeholder="Ex: Os Indomáveis" value={teamName}
+              onChange={e => setTeamName(e.target.value)} maxLength={20}/>
+          </div>
+
+          <div className="reg-players-label">👥 Jogadores</div>
+          {players3.map((p, i) => (
+            <div key={i} className="reg-player-row">
+              <div className="reg-player-num">{i+1}</div>
+              <div className="reg-player-fields">
+                <input className="field-input" placeholder={`Nome do jogador ${i+1}`}
+                  value={p.name} onChange={e => setPlayer(i,'name',e.target.value)}/>
+                <div className="pos-picker" style={{marginTop:6}}>
+                  {POSITIONS.map(pos => (
+                    <button key={pos} className={`pos-opt${p.position===pos?' active':''}`}
+                      onClick={() => setPlayer(i,'position',pos)}>{pos}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ))}
+
+          {hasFee && (
+            <div className="fee-preview">
+              💸 Taxa de inscrição: <strong>R$ {fee.toFixed(2).replace('.',',')}</strong> por time
+            </div>
+          )}
+
+          <button className="submit-btn" style={{marginTop:16}}
+            onClick={handleSubmitForm}
+            disabled={!teamName.trim() || players3.some(p=>!p.name.trim())}>
+            {hasFee ? 'Continuar para Pagamento →' : 'Confirmar Inscrição'}
+          </button>
+          {deadline && <p className="deadline-note">Prazo: {fmtDate(deadline)}</p>}
+        </div>
+      )}
+
+      {/* Step 2 - Pix */}
+      {step === 2 && (
+        <div className="card">
+          <h2 className="card-title">💸 Pagamento via Pix</h2>
+          <p className="muted" style={{marginBottom:16}}>Realize o pagamento e depois envie o comprovante.</p>
+
           <div className="pix-box">
             <div className="pix-header">
               <span className="pix-icon">💸</span>
               <div>
-                <div className="pix-title">Taxa de inscrição</div>
-                <div className="pix-value">R$ {Number(settings.entry_fee).toFixed(2).replace('.',',')}</div>
+                <div className="pix-title">Valor a pagar</div>
+                <div className="pix-value">R$ {fee.toFixed(2).replace('.',',')}</div>
               </div>
             </div>
             {pixKey && (
-              <div className="pix-key-box">
+              <div className="pix-key-box" onClick={() => navigator.clipboard?.writeText(pixKey)}>
                 <div className="pix-key-label">Chave Pix {pixName ? `— ${pixName}` : ''}</div>
-                <div className="pix-key-value" onClick={() => {
-                  navigator.clipboard?.writeText(pixKey)
-                }}>{pixKey} <span className="pix-copy">📋 copiar</span></div>
+                <div className="pix-key-value">{pixKey} <span className="pix-copy">📋 copiar</span></div>
               </div>
             )}
-            <p className="pix-note">⚠️ Envie o comprovante pelo WhatsApp ao organizador após se inscrever. Sua inscrição será confirmada após verificação do pagamento.</p>
           </div>
-        )}
 
-        <button className="submit-btn" onClick={handle} disabled={loading || !name.trim()}>
-          {loading ? 'Salvando...' : hasFee ? `Inscrever-se · R$ ${Number(settings.entry_fee).toFixed(2).replace('.',',')}` : 'Confirmar Inscrição'}
-        </button>
-        {deadline && <p className="deadline-note">Prazo: {fmtDate(deadline)}</p>}
-      </div>
+          <div style={{display:'flex',gap:8,marginTop:16}}>
+            <button className="action-btn" onClick={()=>setStep(1)}>← Voltar</button>
+            <button className="submit-btn" style={{flex:1}} onClick={()=>setStep(3)}>
+              Já paguei → Enviar comprovante
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Step 3 - Receipt */}
+      {step === 3 && (
+        <div className="card">
+          <h2 className="card-title">📎 Comprovante de Pagamento</h2>
+          <p className="muted" style={{marginBottom:16}}>
+            {hasFee ? 'Envie o print ou foto do comprovante Pix.' : 'Confirme sua inscrição.'}
+          </p>
+
+          {hasFee && (
+            <div className="receipt-upload" onClick={() => fileRef.current?.click()}>
+              {receipt
+                ? <div className="receipt-preview">
+                    <img src={`data:${receiptType};base64,${receipt}`} alt="comprovante" style={{maxWidth:'100%',maxHeight:200,borderRadius:8}}/>
+                    <div className="receipt-change">Toque para trocar</div>
+                  </div>
+                : <div className="receipt-placeholder">
+                    <div style={{fontSize:40}}>📸</div>
+                    <div>Toque para adicionar foto ou print</div>
+                    <div className="muted sm">JPG, PNG ou PDF</div>
+                  </div>
+              }
+              <input ref={fileRef} type="file" accept="image/*,application/pdf"
+                style={{display:'none'}} onChange={handleFileChange}/>
+            </div>
+          )}
+
+          <div style={{display:'flex',gap:8,marginTop:16}}>
+            <button className="action-btn" onClick={()=>setStep(hasFee?2:1)}>← Voltar</button>
+            <button className="submit-btn" style={{flex:1}}
+              onClick={handleSubmitReceipt}
+              disabled={loading || (hasFee && !receipt)}>
+              {loading ? 'Enviando...' : '✅ Enviar Inscrição'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -804,14 +982,16 @@ function AdminLogin({ correctPass, onSuccess }) {
 /* ─────────────────────────────────────────────────────────────
    ADMIN VIEW
 ───────────────────────────────────────────────────────────── */
-function AdminView({ players, teams, games, deadline, drawn, settings, execDraw, saveGame, saveSettings, saveDeadline, removePlayer, reorderGames, suggestOrder, togglePaid, resetTournament, setView, setActiveGame, notify }) {
+function AdminView({ players, teams, games, deadline, drawn, settings, execDraw, saveGame, saveSettings, saveDeadline, removePlayer, reorderGames, suggestOrder, togglePaid, resetTournament, registrations, approveRegistration, rejectRegistration, setView, setActiveGame, notify }) {
   const [tab, setTab] = useState('dash')
+  const pendingCount = registrations.filter(r => r.status === 'pending').length
   const TABS = [
-    { k: 'dash', l: 'Dashboard' },
-    { k: 'players', l: `Inscritos (${players.length})` },
+    { k: 'dash',    l: 'Dashboard' },
+    { k: 'regs',    l: `Inscrições${pendingCount > 0 ? ` 🔴${pendingCount}` : ` (${registrations.length})`}` },
+    { k: 'players', l: `Jogadores (${players.length})` },
     { k: 'bracket', l: 'Jogos' },
-    { k: 'teams', l: 'Times' },
-    { k: 'config', l: '⚙️ Config' },
+    { k: 'teams',   l: 'Times' },
+    { k: 'config',  l: '⚙️ Config' },
   ]
   return (
     <div className="page">
@@ -821,7 +1001,8 @@ function AdminView({ players, teams, games, deadline, drawn, settings, execDraw,
           <button key={k} className={`tab-btn${tab === k ? ' active' : ''}`} onClick={() => setTab(k)}>{l}</button>
         ))}
       </div>
-      {tab === 'dash'    && <AdminDash players={players} teams={teams} games={games} drawn={drawn} deadline={deadline} execDraw={execDraw} saveDeadline={saveDeadline} />}
+      {tab === 'dash'    && <AdminDash players={players} teams={teams} games={games} drawn={drawn} deadline={deadline} execDraw={execDraw} saveDeadline={saveDeadline} registrations={registrations} />}
+      {tab === 'regs'    && <AdminRegistrations registrations={registrations} approveRegistration={approveRegistration} rejectRegistration={rejectRegistration} notify={notify} />}
       {tab === 'players' && <AdminPlayers players={players} teams={teams} removePlayer={removePlayer} togglePaid={togglePaid} drawn={drawn} notify={notify} settings={settings} />}
       {tab === 'bracket' && <AdminBracket games={games} setView={setView} setActiveGame={setActiveGame} reorderGames={reorderGames} suggestOrder={suggestOrder} notify={notify} />}
       {tab === 'teams'   && <AdminTeams teams={teams} players={players} games={games} eventName={settings.event_name} />}
@@ -830,7 +1011,126 @@ function AdminView({ players, teams, games, deadline, drawn, settings, execDraw,
   )
 }
 
-function AdminDash({ players, teams, games, drawn, deadline, execDraw, saveDeadline }) {
+function AdminRegistrations({ registrations, approveRegistration, rejectRegistration, notify }) {
+  const [viewReceipt, setViewReceipt] = useState(null)
+  const [rejectId, setRejectId]       = useState(null)
+  const [reason, setReason]           = useState('')
+
+  const pending  = registrations.filter(r => r.status === 'pending')
+  const approved = registrations.filter(r => r.status === 'approved')
+  const rejected = registrations.filter(r => r.status === 'rejected')
+
+  const statusColor = { pending: '#f59e0b', approved: '#22c55e', rejected: '#ef4444' }
+  const statusLabel = { pending: '⏳ Pendente', approved: '✅ Aprovado', rejected: '❌ Recusado' }
+
+  return (
+    <div>
+      {/* Receipt modal */}
+      {viewReceipt && (
+        <div className="confirm-overlay" onClick={() => setViewReceipt(null)}>
+          <div className="confirm-box" style={{maxWidth:480}} onClick={e=>e.stopPropagation()}>
+            <h3 style={{marginBottom:12,color:'#e2e8f0'}}>📎 Comprovante</h3>
+            <img src={`data:${viewReceipt.type};base64,${viewReceipt.img}`}
+              alt="comprovante" style={{width:'100%',borderRadius:8,maxHeight:400,objectFit:'contain'}}/>
+            <button className="action-btn" style={{marginTop:12,width:'100%'}} onClick={()=>setViewReceipt(null)}>Fechar</button>
+          </div>
+        </div>
+      )}
+
+      {/* Reject modal */}
+      {rejectId && (
+        <div className="confirm-overlay">
+          <div className="confirm-box">
+            <h3 style={{marginBottom:8,color:'#e2e8f0'}}>❌ Recusar inscrição</h3>
+            <div className="field">
+              <label className="field-label">Motivo (opcional)</label>
+              <input className="field-input" placeholder="Ex: comprovante inválido"
+                value={reason} onChange={e=>setReason(e.target.value)}/>
+            </div>
+            <div className="confirm-btns">
+              <button className="action-btn" onClick={()=>{setRejectId(null);setReason('')}}>Cancelar</button>
+              <button className="action-btn danger" onClick={()=>{rejectRegistration(rejectId,reason);setRejectId(null);setReason('')}}>Confirmar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Stats */}
+      <div className="dash-stats" style={{marginBottom:16}}>
+        <div className="dash-stat-card" style={{'--sc':'#f59e0b'}}>
+          <span className="dash-stat-val">{pending.length}</span>
+          <span className="dash-stat-label">Pendentes</span>
+        </div>
+        <div className="dash-stat-card" style={{'--sc':'#22c55e'}}>
+          <span className="dash-stat-val">{approved.length}</span>
+          <span className="dash-stat-label">Aprovados</span>
+        </div>
+        <div className="dash-stat-card" style={{'--sc':'#ef4444'}}>
+          <span className="dash-stat-val">{rejected.length}</span>
+          <span className="dash-stat-label">Recusados</span>
+        </div>
+      </div>
+
+      {registrations.length === 0 && (
+        <div className="card info-card"><p className="muted">Nenhuma inscrição recebida ainda.</p></div>
+      )}
+
+      <div style={{display:'flex',flexDirection:'column',gap:10}}>
+        {registrations.map(reg => (
+          <div key={reg.id} className={`reg-admin-card${reg.status==='pending'?' reg-pending':''}`}>
+            <div className="reg-admin-header">
+              <div>
+                <div className="reg-admin-team">{reg.team_name}</div>
+                <div className="reg-admin-code">Código: <strong>{reg.code}</strong></div>
+                <div className="muted sm">{new Date(reg.created_at).toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'})}</div>
+              </div>
+              <div>
+                <span className="reg-status-badge" style={{background:statusColor[reg.status]+'22',color:statusColor[reg.status],border:`1px solid ${statusColor[reg.status]}44`}}>
+                  {statusLabel[reg.status]}
+                </span>
+              </div>
+            </div>
+
+            {/* Players */}
+            <div className="reg-admin-players">
+              {reg.players?.map((p,i) => (
+                <div key={i} className="reg-admin-player">
+                  <span className="pos-badge sm">{p.position.slice(0,3)}</span>
+                  <span>{p.name}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* Actions */}
+            <div className="reg-admin-actions">
+              {reg.receipt_img && (
+                <button className="action-btn" onClick={()=>setViewReceipt({img:reg.receipt_img,type:reg.receipt_type})}>
+                  📎 Ver comprovante
+                </button>
+              )}
+              {reg.status === 'pending' && (
+                <>
+                  <button className="action-btn" style={{background:'rgba(34,197,94,.15)',borderColor:'#22c55e40',color:'#22c55e'}}
+                    onClick={()=>approveRegistration(reg.id)}>
+                    ✅ Aprovar
+                  </button>
+                  <button className="action-btn danger" onClick={()=>setRejectId(reg.id)}>
+                    ❌ Recusar
+                  </button>
+                </>
+              )}
+              {reg.status === 'rejected' && reg.reject_reason && (
+                <span className="muted sm">Motivo: {reg.reject_reason}</span>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function AdminDash({ players, teams, games, drawn, deadline, execDraw, saveDeadline, registrations }) {
   const [dl, setDl] = useState(deadline ? deadline.slice(0, 16) : '')
   const done = games.filter(g => g.status === 'done').length
   const live = games.filter(g => g.status === 'live').length
@@ -1883,6 +2183,39 @@ textarea.field-input{resize:vertical;}
 .toggle-row{display:flex;align-items:center;gap:12px;}
 .toggle-btn{background:var(--bg3);border:1px solid var(--border);color:var(--muted);padding:8px 16px;border-radius:8px;cursor:pointer;font-weight:700;font-size:13px;transition:all .15s;}
 .toggle-btn.on{background:rgba(34,197,94,.15);border-color:rgba(34,197,94,.4);color:#22c55e;}
+.reg-steps{display:flex;align-items:center;justify-content:center;gap:0;margin-bottom:20px;padding:16px;}
+.reg-step{display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;position:relative;}
+.reg-step:not(:last-child)::after{content:'';position:absolute;top:14px;left:60%;width:80%;height:2px;background:var(--border);}
+.reg-step.done:not(:last-child)::after{background:var(--accent);}
+.reg-step-dot{width:28px;height:28px;border-radius:50%;border:2px solid var(--border);background:var(--bg2);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--muted);z-index:1;}
+.reg-step.active .reg-step-dot{border-color:var(--accent);color:var(--accent);background:rgba(249,115,22,.1);}
+.reg-step.done .reg-step-dot{border-color:var(--accent);background:var(--accent);color:#fff;}
+.reg-step-label{font-size:10px;color:var(--muted);text-align:center;letter-spacing:.3px;}
+.reg-step.active .reg-step-label{color:var(--accent);}
+.reg-players-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin-bottom:10px;}
+.reg-player-row{display:flex;gap:10px;align-items:flex-start;margin-bottom:14px;padding:12px;background:var(--bg3);border-radius:10px;}
+.reg-player-num{width:24px;height:24px;border-radius:50%;background:rgba(249,115,22,.15);color:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:900;font-size:13px;flex-shrink:0;margin-top:10px;}
+.reg-player-fields{flex:1;}
+.fee-preview{background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:8px;padding:10px 14px;font-size:14px;color:var(--muted);margin-top:12px;}
+.fee-preview strong{color:#22c55e;}
+.receipt-upload{border:2px dashed var(--border);border-radius:12px;padding:24px;text-align:center;cursor:pointer;transition:border .15s;margin-bottom:8px;}
+.receipt-upload:hover{border-color:var(--accent);}
+.receipt-placeholder{display:flex;flex-direction:column;align-items:center;gap:8px;color:var(--muted);font-size:14px;}
+.receipt-preview{position:relative;}
+.receipt-change{color:var(--accent);font-size:12px;margin-top:6px;}
+.reg-code-box{background:var(--bg3);border:2px solid var(--accent);border-radius:14px;padding:20px;text-align:center;margin:16px 0;}
+.reg-code-label{font-size:11px;text-transform:uppercase;letter-spacing:2px;color:var(--muted);margin-bottom:8px;}
+.reg-code{font-family:'Barlow Condensed',sans-serif;font-size:42px;font-weight:900;color:var(--accent);letter-spacing:4px;}
+.reg-code-note{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5;}
+.reg-admin-card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:16px;}
+.reg-admin-card.reg-pending{border-left:3px solid #f59e0b;}
+.reg-admin-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;flex-wrap:wrap;gap:8px;}
+.reg-admin-team{font-family:'Barlow Condensed',sans-serif;font-size:20px;font-weight:900;color:#fff;}
+.reg-admin-code{font-size:12px;color:var(--muted);}
+.reg-status-badge{padding:4px 12px;border-radius:20px;font-size:12px;font-weight:700;}
+.reg-admin-players{display:flex;flex-direction:column;gap:4px;margin-bottom:12px;}
+.reg-admin-player{display:flex;align-items:center;gap:6px;font-size:13px;padding:4px 0;border-top:1px solid var(--border);}
+.reg-admin-actions{display:flex;gap:8px;flex-wrap:wrap;}
 .drawn-summary{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px;}
 .drawn-check{font-size:22px;flex-shrink:0;margin-top:2px;}
 .drawn-teams-preview{display:flex;flex-direction:column;gap:6px;}
